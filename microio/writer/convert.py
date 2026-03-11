@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 
 from microio.common.constants import DEFAULT_CHUNK_TARGET_MB, DEFAULT_TARGET_NGFF
-from microio.common.logging_utils import setup_logging
 from microio.common.models import ConversionReport, SceneReport
 from .infer import infer_axis_resolution
 from .ngff import create_root_store, write_root_ome_group, write_scene_image
@@ -34,7 +33,6 @@ def convert_file(
     overwrite: bool = False,
     chunk_target_mb: int = DEFAULT_CHUNK_TARGET_MB,
     max_workers: int = 1,
-    log_level: str = "INFO",
     max_t: int | None = None,
     max_c: int | None = None,
     max_z: int | None = None,
@@ -62,8 +60,6 @@ def convert_file(
     max_workers:
         Reserved concurrency parameter. The current implementation remains
         serial and logs a warning when values above one are requested.
-    log_level:
-        Package logging level.
     max_t, max_c, max_z:
         Optional truncation of the written data along the time, channel, and
         axial dimensions. This is mainly useful for smoke tests and debugging.
@@ -73,7 +69,6 @@ def convert_file(
     ConversionReport
         Structured report containing per-scene status, warnings, and errors.
     """
-    logger = setup_logging(log_level)
     logger.info("Starting conversion: %s -> %s", input_path, output_path)
 
     input_path = Path(input_path)

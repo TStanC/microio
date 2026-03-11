@@ -91,3 +91,35 @@ def test_select_scenes_accepts_placeholder_bioio_names_and_filters_by_xml_name()
     assert [scene.index for scene in result.selected] == [1, 2]
     assert result.total_count == 3
     assert result.excluded_count == 1
+
+
+def test_select_scenes_accepts_placeholder_bioio_names_for_include_scene_name():
+    scenes_xml = [Scene(0, "ClimateDataGraph"), Scene(1, "BigCircle1"), Scene(2, "BigCircle2")]
+
+    result = scene_selection.select_scenes(
+        scenes_xml,
+        bioio_scenes=["Image:0", "Image:1", "Image:2"],
+        include_scene_index=None,
+        include_scene_name=["BigCircle2"],
+        exclude_scene_regex=None,
+    )
+
+    assert [scene.index for scene in result.selected] == [2]
+    assert result.total_count == 3
+    assert result.excluded_count == 2
+
+
+def test_select_scenes_accepts_placeholder_bioio_names_for_exclude_scene_regex():
+    scenes_xml = [Scene(0, "ClimateDataGraph"), Scene(1, "BigCircle1"), Scene(2, "BigCircle2")]
+
+    result = scene_selection.select_scenes(
+        scenes_xml,
+        bioio_scenes=["Image:0", "Image:1", "Image:2"],
+        include_scene_index=None,
+        include_scene_name=None,
+        exclude_scene_regex=["Climate"],
+    )
+
+    assert [scene.index for scene in result.selected] == [1, 2]
+    assert result.total_count == 3
+    assert result.excluded_count == 1

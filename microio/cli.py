@@ -6,10 +6,12 @@ import argparse
 import json
 
 from microio import convert_file, open_dataset, setup_java
+from microio.common.logging_utils import setup_logging
 
 
 def _cmd_convert(args) -> int:
     """Run conversion command and print structured JSON report."""
+    setup_logging(args.log_level)
     setup_java(
         fetch_mode=args.java_fetch_mode,
         java_version=args.java_version,
@@ -26,7 +28,6 @@ def _cmd_convert(args) -> int:
         overwrite=args.overwrite,
         chunk_target_mb=args.chunk_target_mb,
         max_workers=args.max_workers,
-        log_level=args.log_level,
         max_t=args.max_t,
         max_c=args.max_c,
         max_z=args.max_z,
@@ -58,6 +59,7 @@ def _cmd_convert(args) -> int:
 
 def _cmd_inspect(args) -> int:
     """Run inspection command and print root/scene metadata JSON."""
+    setup_logging(args.log_level)
     ds = open_dataset(args.input)
     scenes = ds.list_scenes()
     payload = {
@@ -101,6 +103,7 @@ def main() -> int:
 
     p_inspect = sub.add_parser("inspect", help="Inspect OME-Zarr dataset")
     p_inspect.add_argument("--input", required=True)
+    p_inspect.add_argument("--log-level", default="INFO")
     p_inspect.set_defaults(func=_cmd_inspect)
 
     args = parser.parse_args()

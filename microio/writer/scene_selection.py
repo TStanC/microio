@@ -52,35 +52,42 @@ def select_scenes(scenes_xml, bioio_scenes, include_scene_index, include_scene_n
             f"{missing_names}; available names={available_names}"
         )
 
+    selected_indices: set[int] = set()
     out = []
-    seen_indices: set[int] = set()
     for idx, bioio_name in enumerate(bioio_scenes):
         s = xml_by_index[idx]
         if not bioio_names_are_placeholders and s.name != bioio_name:
             raise ValueError(
                 f"Scene mismatch at index {idx}: OME-XML name={s.name!r}, BioIO name={bioio_name!r}"
             )
-        if include_scene_index and s.index not in include_scene_index:
-            continue
-        if include_scene_name and s.name not in include_scene_name:
-            continue
-        if exclude_scene_regex and any(re.search(rx, s.name) for rx in exclude_scene_regex):
+        effective_name = s.name if bioio_names_are_placeholders else bioio_name
+        if not _is_included(
+            idx=s.index,
+            name=effective_name,
+            include_scene_index=include_scene_index,
+            include_scene_name=include_scene_name,
+            exclude_scene_regex=exclude_scene_regex,
+        ):
             logger.debug("Excluded scene %s because it matched an exclusion pattern", s.name)
             continue
         out.append(s)
-        seen_indices.add(s.index)
+        selected_indices.add(s.index)
 
     wanted_indices = {
         idx
-        for idx, scene_name in enumerate(bioio_scenes)
-        if (not include_scene_index or idx in include_scene_index)
-        and (not include_scene_name or scene_name in include_scene_name)
-        and not (exclude_scene_regex and any(re.search(rx, scene_name) for rx in exclude_scene_regex))
+        for idx, bioio_name in enumerate(bioio_scenes)
+        if _is_included(
+            idx=idx,
+            name=xml_by_index[idx].name if bioio_names_are_placeholders else bioio_name,
+            include_scene_index=include_scene_index,
+            include_scene_name=include_scene_name,
+            exclude_scene_regex=exclude_scene_regex,
+        )
     }
-    if seen_indices != wanted_indices:
+    if selected_indices != wanted_indices:
         raise ValueError(
             "Scene selection was incomplete; wanted indices="
-            f"{sorted(wanted_indices)} treated={sorted(seen_indices)}"
+            f"{sorted(wanted_indices)} treated={sorted(selected_indices)}"
         )
 
     return SceneSelection(
@@ -93,3 +100,14 @@ def select_scenes(scenes_xml, bioio_scenes, include_scene_index, include_scene_n
 def _is_placeholder_bioio_name(name: str, idx: int) -> bool:
     """Return whether BioIO exposed a generic index-based fallback scene name."""
     return bool(re.fullmatch(rf"Image:{idx}", name))
+
+
+def _is_included(*, idx: int, name: str, include_scene_index, include_scene_name, exclude_scene_regex) -> bool:
+    """Return whether one scene passed the caller's include/exclude filters."""
+    if include_scene_index and idx not in include_scene_index:
+        return False
+    if include_scene_name and name not in include_scene_name:
+        return False
+    if exclude_scene_regex and any(re.search(rx, name) for rx in exclude_scene_regex):
+        return False
+    return True
