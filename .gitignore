@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# packaging
+*.egg-info/
+build/
+dist/
+
+# environments
+.env
+.venv
+venv/
+
+# notebooks
+.ipynb_checkpoints
