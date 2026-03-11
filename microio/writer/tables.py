@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 
@@ -12,6 +13,9 @@ from microio.common.constants import AXES_TRAJECTORY_TABLE_NAME, MICROIO_TABLE_S
 from microio.common.models import AxisResolution
 from microio.common.units import normalize_unit
 from .xmlparse import SceneXmlMeta
+
+
+logger = logging.getLogger("microio.writer.tables")
 
 
 def write_axes_trajectory_table(
@@ -25,6 +29,23 @@ def write_axes_trajectory_table(
     original_metadata: dict[str, str] | None = None,
 ) -> None:
     """Write a raw-first per-plane localization table under ``scene/tables``.
+
+    Parameters
+    ----------
+    scene_group:
+        Destination scene group in the OME-Zarr hierarchy.
+    scene:
+        Parsed OME scene metadata, including per-plane records.
+    axis_res:
+        Scene-level axis resolution metadata. It is not written into the table
+        directly, but is accepted so the caller can pass the same structure used
+        elsewhere in the conversion pipeline.
+    size_t, size_c, size_z:
+        Optional logical sizes after any caller-imposed truncation. When omitted,
+        the sizes from ``scene`` are used.
+    original_metadata:
+        Optional vendor metadata used to recover real time positions when OME
+        ``Plane.DeltaT`` values are incomplete.
 
     The stored row count always matches the logical plane count ``T * C * Z`` of
     the written image data. Raw OME plane positions are preferred; abstract OME
@@ -40,6 +61,13 @@ def write_axes_trajectory_table(
     size_c = int(size_c if size_c is not None else scene.size_c)
     size_z = int(size_z if size_z is not None else scene.size_z)
     row_count = max(1, size_t * size_c * size_z)
+    logger.info(
+        "Writing axes trajectory table for scene %s with logical shape (T=%d, C=%d, Z=%d)",
+        scene.name,
+        size_t,
+        size_c,
+        size_z,
+    )
 
     the_t, the_c, the_z, plane_rows = _build_plane_rows(scene, size_t=size_t, size_c=size_c, size_z=size_z)
     time_positions = _extract_original_metadata_time_positions(
@@ -110,6 +138,7 @@ def write_axes_trajectory_table(
 
     for name, arr in data_cols.items():
         table.create_array(name, data=arr, chunks=(min(len(arr), 8192),))
+        logger.debug("Wrote table column %s with %d rows", name, len(arr))
 
     table.attrs["schema"] = "microio.axes_trajectory"
     table.attrs["schema_version"] = MICROIO_TABLE_SCHEMA_VERSION
@@ -122,6 +151,7 @@ def write_axes_trajectory_table(
         "y": axis_y["metadata"],
         "x": axis_x["metadata"],
     }
+    logger.debug("Finished axes trajectory table for scene %s", scene.name)
 
 
 def _build_plane_rows(scene: SceneXmlMeta, *, size_t: int, size_c: int, size_z: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, str | None] | None]]:
@@ -148,6 +178,7 @@ def _build_plane_rows(scene: SceneXmlMeta, *, size_t: int, size_c: int, size_z: 
             continue
         idx = _flat_index(t, c, z, size_c=size_c, size_z=size_z)
         if plane_rows[idx] is not None:
+            logger.error("Duplicate plane metadata for scene %s at (t=%d, c=%d, z=%d)", scene.name, t, c, z)
             raise ValueError(f"Duplicate plane metadata for scene {scene.name!r} at (t={t}, c={c}, z={z})")
         plane_rows[idx] = plane
 
@@ -170,6 +201,7 @@ def _resolve_axis_values(
     """Resolve one axis to a position vector plus per-axis metadata."""
     if override_raw is not None and override_source is not None:
         values, unit = override_raw
+        logger.debug("Using override values for axis from %s", override_source)
         return {
             "values": np.asarray(values, dtype=np.float64),
             "metadata": {
@@ -199,7 +231,9 @@ def _resolve_axis_values(
                     raw_units.add(unit)
         if found_any:
             if len(raw_units) > 1:
+                logger.error("Mixed raw units detected for %s: %s", raw_source, sorted(raw_units))
                 raise ValueError(f"Mixed raw units for {raw_source}: {sorted(raw_units)}")
+            logger.debug("Resolved axis values directly from %s", raw_source)
             return {
                 "values": raw_values,
                 "metadata": {
@@ -212,6 +246,7 @@ def _resolve_axis_values(
             }
 
     if abstract_field is not None and abstract_source is not None:
+        logger.warning("Falling back to abstract positions from %s", abstract_source)
         return {
             "values": np.asarray(abstract_field, dtype=np.float64),
             "metadata": {
@@ -243,7 +278,7 @@ def _extract_original_metadata_time_positions(
     size_c: int,
     size_z: int,
 ) -> tuple[np.ndarray, str | None] | None:
-    """Extract actual per-plane or per-time timestamps from vendor metadata if unambiguous."""
+    """Extract per-plane or per-time timestamps from vendor metadata."""
     pattern_value = re.compile(rf"^{re.escape(scene.name)} Value #(\d+)$", re.IGNORECASE)
     pattern_unit = re.compile(rf"^{re.escape(scene.name)} Units #(\d+)$", re.IGNORECASE)
 
@@ -271,11 +306,13 @@ def _extract_original_metadata_time_positions(
         paired.append((idx, raw_value, raw_unit))
 
     if not paired:
+        logger.debug("No usable OriginalMetadata time positions found for scene %s", scene.name)
         return None
 
     paired.sort(key=lambda item: item[0])
     units = {unit for _, _, unit in paired if unit}
     if len(units) > 1:
+        logger.error("Mixed OriginalMetadata time units for scene %s: %s", scene.name, sorted(units))
         raise ValueError(f"Mixed OriginalMetadata time units for scene {scene.name!r}: {sorted(units)}")
 
     values = np.asarray([value for _, value, _ in paired], dtype=np.float64)
@@ -289,6 +326,7 @@ def _extract_original_metadata_time_positions(
             for z in range(size_z):
                 for c in range(size_c):
                     ordered[_flat_index(t, c, z, size_c=size_c, size_z=size_z)] = sliced[t, z, c]
+        logger.info("Resolved per-plane time positions from OriginalMetadata for scene %s", scene.name)
         return ordered, next(iter(units), None)
     if len(values) == scene.size_t:
         expanded = np.full(row_count, np.nan, dtype=np.float64)
@@ -296,7 +334,15 @@ def _extract_original_metadata_time_positions(
             for z in range(size_z):
                 for c in range(size_c):
                     expanded[_flat_index(t, c, z, size_c=size_c, size_z=size_z)] = values[t]
+        logger.info("Resolved per-timepoint time positions from OriginalMetadata for scene %s", scene.name)
         return expanded, next(iter(units), None)
+    logger.warning(
+        "OriginalMetadata time positions for scene %s were ambiguous (count=%d, expected full=%d or time=%d)",
+        scene.name,
+        len(values),
+        full_row_count,
+        scene.size_t,
+    )
     return None
 
 

@@ -14,9 +14,13 @@ from microio.common.logging_utils import setup_logging
 from microio.common.models import ConversionReport, SceneReport
 from .infer import infer_axis_resolution
 from .ngff import create_root_store, write_root_ome_group, write_scene_image
+from .scene_selection import select_scenes
 from .source import BioformatsSource
 from .tables import write_axes_trajectory_table
 from .xmlparse import parse_ome_xml
+
+
+logger = logging.getLogger("microio.writer.convert")
 
 
 def convert_file(
@@ -35,7 +39,40 @@ def convert_file(
     max_c: int | None = None,
     max_z: int | None = None,
 ) -> ConversionReport:
-    """Convert one microscopy file into one multi-scene OME-Zarr dataset."""
+    """Convert one microscopy file into a multi-scene OME-Zarr dataset.
+
+    Parameters
+    ----------
+    input_path:
+        Path to the proprietary microscopy input file.
+    output_path:
+        Destination path for the output OME-Zarr directory.
+    target_ngff:
+        NGFF version string written into the output metadata.
+    include_scene_index:
+        Optional allow-list of zero-based scene indices.
+    include_scene_name:
+        Optional allow-list of scene names as reported by OME-XML.
+    exclude_scene_regex:
+        Optional list of regular expressions used to skip scenes by name.
+    overwrite:
+        Whether an existing output directory should be removed before writing.
+    chunk_target_mb:
+        Approximate chunk-size budget used by chunk estimation.
+    max_workers:
+        Reserved concurrency parameter. The current implementation remains
+        serial and logs a warning when values above one are requested.
+    log_level:
+        Package logging level.
+    max_t, max_c, max_z:
+        Optional truncation of the written data along the time, channel, and
+        axial dimensions. This is mainly useful for smoke tests and debugging.
+
+    Returns
+    -------
+    ConversionReport
+        Structured report containing per-scene status, warnings, and errors.
+    """
     logger = setup_logging(log_level)
     logger.info("Starting conversion: %s -> %s", input_path, output_path)
 
@@ -45,33 +82,58 @@ def convert_file(
 
     ome_xml = source.get_ome_xml()
     _, scenes_xml, original_metadata = parse_ome_xml(ome_xml)
+    bioio_scenes = source.get_scene_names()
+    logger.info(
+        "Scene discovery summary: total=%d metadata=%d",
+        len(bioio_scenes),
+        len(scenes_xml),
+    )
 
-    root = create_root_store(output_path, overwrite=overwrite)
     report = ConversionReport(input_path=input_path, output_path=output_path, target_ngff=target_ngff)
     _warn_runtime_limits(report, logger, max_workers=max_workers)
 
-    selected = _select_scenes(scenes_xml, include_scene_index, include_scene_name, exclude_scene_regex)
+    selection = select_scenes(
+        scenes_xml,
+        bioio_scenes,
+        include_scene_index,
+        include_scene_name,
+        exclude_scene_regex,
+    )
+    selected = selection.selected
+    logger.info(
+        "Scene selection summary: total=%d excluded=%d converting=%d",
+        selection.total_count,
+        selection.excluded_count,
+        len(selected),
+    )
     if not selected:
         msg = "No scenes selected after applying include/exclude filters"
         report.warnings.append(msg)
         logger.warning(msg)
 
+    root = create_root_store(output_path, overwrite=overwrite)
     scene_ids: list[str] = []
     name_seen: dict[str, int] = {}
-    for scene in selected:
+    total_selected = len(selected)
+    for ordinal, scene in enumerate(selected, start=1):
         scene_id = _unique_scene_id(scene.name, name_seen)
         scene_ids.append(scene_id)
         scene_group = root.require_group(scene_id)
         srep = SceneReport(scene_index=scene.index, scene_id=scene_id, converted=False)
+        logger.info("Converting scene %d/%d: %s (index=%d)", ordinal, total_selected, scene_id, scene.index)
 
         try:
             data = source.get_scene_dask(scene.index)
+            logger.debug("Loaded scene %s with shape=%s dtype=%s", scene_id, getattr(data, "shape", None), getattr(data, "dtype", None))
             if max_t is not None:
                 data = data[: max(1, int(max_t))]
+                logger.debug("Applied max_t=%s to scene %s", max_t, scene_id)
             if max_c is not None:
                 data = data[:, : max(1, int(max_c))]
+                logger.debug("Applied max_c=%s to scene %s", max_c, scene_id)
             if max_z is not None:
                 data = data[:, :, : max(1, int(max_z))]
+                logger.debug("Applied max_z=%s to scene %s", max_z, scene_id)
 
             axis_res = infer_axis_resolution(scene, original_metadata)
             srep.axis_resolution = axis_res
@@ -85,6 +147,7 @@ def convert_file(
                 axis_res["x"].unit_normalized,
             ]
             chunks = _estimate_chunks(tuple(data.shape), _itemsize_of(data.dtype), chunk_target_mb)
+            logger.debug("Estimated chunks for scene %s: %s", scene_id, chunks)
 
             write_scene_image(
                 scene_group,
@@ -130,6 +193,13 @@ def convert_file(
             scene_group.attrs["bioformats2raw.layout"] = 3
             for axis_name, axis_info in axis_res.items():
                 if axis_info.fallback:
+                    logger.warning(
+                        "Scene %s axis %s used fallback resolution value=%s unit=%s",
+                        scene_id,
+                        axis_name,
+                        axis_info.value,
+                        axis_info.unit_normalized,
+                    )
                     report.fallback_events.append(
                         {
                             "scene_id": scene_id,
@@ -161,41 +231,66 @@ def convert_file(
 
 
 def convert_many(inputs: list[str | Path], output_dir: str | Path, **kwargs) -> list[ConversionReport]:
-    """Convert multiple inputs into ``output_dir/<stem>.zarr`` datasets."""
+    """Convert multiple proprietary inputs into sibling OME-Zarr datasets.
+
+    Parameters
+    ----------
+    inputs:
+        Source file paths to convert.
+    output_dir:
+        Destination directory where ``<stem>.zarr`` outputs will be created.
+    **kwargs:
+        Additional keyword arguments forwarded to :func:`convert_file`.
+
+    Returns
+    -------
+    list[ConversionReport]
+        One structured conversion report per input file.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     reports: list[ConversionReport] = []
     for p in inputs:
         pth = Path(p)
         out = output_dir / f"{pth.stem}.zarr"
+        logger.info("Queueing batch conversion for %s -> %s", pth, out)
         reports.append(convert_file(pth, out, **kwargs))
     return reports
 
 
 def _unique_scene_id(name: str, seen: dict[str, int]) -> str:
-    """Return filesystem-safe, deterministic, collision-free scene ids."""
+    """Return a filesystem-safe, deterministic, collision-free scene id.
+
+    Parameters
+    ----------
+    name:
+        Raw scene name from OME-XML.
+    seen:
+        Mutable counter of identifiers already emitted in the current dataset.
+
+    Returns
+    -------
+    str
+        Sanitized scene identifier. Duplicate names receive ``__<n>`` suffixes.
+    """
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-") or "scene"
     idx = seen.get(cleaned, 0)
     seen[cleaned] = idx + 1
     return cleaned if idx == 0 else f"{cleaned}__{idx}"
 
 
-def _select_scenes(scenes_xml, include_scene_index, include_scene_name, exclude_scene_regex):
-    """Apply scene include/exclude selectors."""
-    out = []
-    for s in scenes_xml:
-        if include_scene_index and s.index not in include_scene_index:
-            continue
-        if include_scene_name and s.name not in include_scene_name:
-            continue
-        if exclude_scene_regex and any(re.search(rx, s.name) for rx in exclude_scene_regex):
-            continue
-        out.append(s)
-    return out
-
-
 def _warn_runtime_limits(report: ConversionReport, logger: logging.Logger, *, max_workers: int) -> None:
-    """Emit warnings for currently unsupported or risky runtime settings."""
+    """Emit warnings for unsupported or risky runtime settings.
+
+    Parameters
+    ----------
+    report:
+        Conversion report that collects user-visible warnings.
+    logger:
+        Logger used for runtime diagnostics.
+    max_workers:
+        Requested worker count from the caller.
+    """
     if max_workers > 1:
         msg = "max_workers > 1 requested, but conversion currently runs serially"
         report.warnings.append(msg)
@@ -210,11 +305,22 @@ def _warn_runtime_limits(report: ConversionReport, logger: logging.Logger, *, ma
             report.warnings.append(msg)
             logger.warning(msg)
     except Exception:
-        pass
+        logger.debug("psutil unavailable; skipping host-memory advisory")
 
 
 def _itemsize_of(dtype) -> int:
-    """Safely resolve dtype itemsize even for non-numpy dtype wrappers."""
+    """Resolve an array ``dtype`` itemsize for NumPy and NumPy-like wrappers.
+
+    Parameters
+    ----------
+    dtype:
+        Data type object or dtype-like token.
+
+    Returns
+    -------
+    int
+        Number of bytes per element.
+    """
     try:
         return int(dtype.itemsize)
     except Exception:
@@ -222,8 +328,24 @@ def _itemsize_of(dtype) -> int:
 
 
 def _estimate_chunks(shape: tuple[int, ...], itemsize: int, chunk_target_mb: int) -> tuple[int, int, int, int, int]:
-    """Estimate TCZYX chunks to stay near memory target."""
+    """Estimate a ``TCZYX`` chunk shape near the requested memory budget.
+
+    Parameters
+    ----------
+    shape:
+        Full array shape, expected in ``TCZYX`` order.
+    itemsize:
+        Element size in bytes.
+    chunk_target_mb:
+        Approximate chunk budget in mebibytes.
+
+    Returns
+    -------
+    tuple[int, int, int, int, int]
+        Chunk sizes in ``TCZYX`` order.
+    """
     if len(shape) != 5:
+        logger.warning("Chunk estimation expected 5D TCZYX data but received shape=%s", shape)
         return tuple(max(1, int(s)) for s in shape)  # type: ignore[return-value]
 
     t, c, z, y, x = (max(1, int(v)) for v in shape)

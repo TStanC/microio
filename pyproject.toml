@@ -13,6 +13,7 @@ dependencies = [
   "dask[array]",
   "ome-zarr>=0.12.0",
   "psutil",
+  "bioio",
 ]
 
 [project.optional-dependencies]

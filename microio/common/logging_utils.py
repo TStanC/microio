@@ -6,9 +6,31 @@ import logging
 
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
-    """Configure logging once and return the package logger."""
+    """Configure package logging and return the root ``microio`` logger.
+
+    Parameters
+    ----------
+    level:
+        Textual logging level such as ``"DEBUG"``, ``"INFO"``, ``"WARNING"``,
+        or ``"ERROR"``. Unknown values fall back to ``INFO``.
+
+    Returns
+    -------
+    logging.Logger
+        The package logger named ``microio``. Child loggers inherit the
+        configured level and handlers.
+
+    Notes
+    -----
+    ``logging.basicConfig`` only affects the first call in a process. This
+    helper still updates the package logger level each time so callers can
+    adjust verbosity across invocations.
+    """
+    resolved_level = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=resolved_level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
-    return logging.getLogger("microio")
+    logger = logging.getLogger("microio")
+    logger.setLevel(resolved_level)
+    return logger

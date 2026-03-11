@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import xml.etree.ElementTree as ET
 
 
 OME_NS = "http://www.openmicroscopy.org/Schemas/OME/2016-06"
 NS = {"ome": OME_NS}
+logger = logging.getLogger("microio.writer.xmlparse")
 
 
 @dataclass
@@ -51,15 +53,29 @@ class SceneXmlMeta:
 
 
 def parse_ome_xml(xml_text: str) -> tuple[ET.Element, list[SceneXmlMeta], dict[str, str]]:
-    """Parse raw OME-XML text into scene metadata and OriginalMetadata map."""
+    """Parse raw OME-XML into normalized scene and vendor metadata objects.
+
+    Parameters
+    ----------
+    xml_text:
+        Raw OME-XML string obtained from Bio-Formats.
+
+    Returns
+    -------
+    tuple[xml.etree.ElementTree.Element, list[SceneXmlMeta], dict[str, str]]
+        Parsed XML root element, normalized per-scene metadata records, and the
+        flattened ``OriginalMetadata`` key/value map.
+    """
     root = ET.fromstring(xml_text)
     images = root.findall(".//ome:Image", NS)
+    logger.debug("Parsing OME-XML containing %d Image elements", len(images))
 
     scenes: list[SceneXmlMeta] = []
     for idx, image in enumerate(images):
         name = image.get("Name") or f"Image:{idx}"
         px = image.find("ome:Pixels", NS)
         if px is None:
+            logger.warning("Skipping Image element %s because it has no Pixels child", name)
             continue
         channels = []
         for c_idx, channel in enumerate(px.findall("ome:Channel", NS)):
@@ -123,6 +139,16 @@ def parse_ome_xml(xml_text: str) -> tuple[ET.Element, list[SceneXmlMeta], dict[s
                 planes=planes,
             )
         )
+        logger.debug(
+            "Parsed scene index=%d name=%s size_t=%d size_c=%d size_z=%d size_y=%d size_x=%d",
+            idx,
+            name,
+            int(px.get("SizeT", "1")),
+            int(px.get("SizeC", "1")),
+            int(px.get("SizeZ", "1")),
+            int(px.get("SizeY", "1")),
+            int(px.get("SizeX", "1")),
+        )
 
     original_metadata = {}
     for om in root.findall(".//ome:OriginalMetadata", NS):
@@ -131,11 +157,16 @@ def parse_ome_xml(xml_text: str) -> tuple[ET.Element, list[SceneXmlMeta], dict[s
         if key is not None and value is not None and key.text is not None:
             original_metadata[key.text] = value.text or ""
 
+    logger.info(
+        "Parsed OME-XML into %d scenes and %d OriginalMetadata entries",
+        len(scenes),
+        len(original_metadata),
+    )
     return root, scenes, original_metadata
 
 
 def _f(v: str | None) -> float | None:
-    """Safe float parser for XML attributes."""
+    """Parse an XML numeric attribute into ``float`` or ``None``."""
     if v is None:
         return None
     try:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import statistics
 import warnings
 
@@ -11,20 +12,44 @@ from microio.common.warnings import NotImplementedMetadataWarning
 from .xmlparse import SceneXmlMeta
 
 
+logger = logging.getLogger("microio.writer.infer")
+
+
 def infer_axis_resolution(scene: SceneXmlMeta, original_metadata: dict[str, str]) -> dict[str, AxisResolution]:
-    """Infer x/y/z/t spacing using explicit metadata, planes, and vendor metadata."""
+    """Infer per-axis sampling from OME and vendor metadata.
+
+    Parameters
+    ----------
+    scene:
+        Normalized scene metadata parsed from OME-XML.
+    original_metadata:
+        Vendor ``OriginalMetadata`` key/value mapping from the same file.
+
+    Returns
+    -------
+    dict[str, AxisResolution]
+        Resolution records for ``x``, ``y``, ``z``, and ``t`` describing the
+        resolved value, unit, provenance, confidence, and fallback status.
+    """
+    logger.debug("Inferring axis resolution for scene %s", scene.name)
     out: dict[str, AxisResolution] = {}
     out["x"] = _infer_space_axis("x", scene.physical_size_x, scene.physical_size_x_unit, scene)
     out["y"] = _infer_space_axis("y", scene.physical_size_y, scene.physical_size_y_unit, scene)
     out["z"] = _infer_z(scene)
     out["t"] = _infer_t(scene, original_metadata)
+    logger.debug(
+        "Resolved axis metadata for scene %s: %s",
+        scene.name,
+        {axis: {"value": meta.value, "unit": meta.unit_normalized, "source": meta.source, "fallback": meta.fallback} for axis, meta in out.items()},
+    )
     return out
 
 
 def _infer_space_axis(axis: str, explicit_value: float | None, explicit_unit: str | None, scene: SceneXmlMeta) -> AxisResolution:
-    """Resolve x/y from explicit Pixel physical sizes or fallback."""
+    """Resolve an in-plane spatial axis from explicit ``Pixels`` metadata."""
     norm_unit, warning_code = normalize_unit(explicit_unit)
     if explicit_value is not None and explicit_value > 0:
+        logger.debug("Scene %s axis %s resolved from Pixels metadata", scene.name, axis)
         return AxisResolution(
             axis=axis,
             value=float(explicit_value),
@@ -36,6 +61,7 @@ def _infer_space_axis(axis: str, explicit_value: float | None, explicit_unit: st
             warning_code=warning_code,
         )
 
+    logger.warning("Scene %s axis %s missing explicit spatial resolution; using fallback 1.0", scene.name, axis)
     warnings.warn(f"{axis}-resolution missing for scene {scene.name}; fallback 1.0", NotImplementedMetadataWarning)
     return AxisResolution(
         axis=axis,
@@ -50,9 +76,10 @@ def _infer_space_axis(axis: str, explicit_value: float | None, explicit_unit: st
 
 
 def _infer_z(scene: SceneXmlMeta) -> AxisResolution:
-    """Resolve z spacing from explicit metadata, then plane deltas, then fallback."""
+    """Resolve axial spacing from OME ``Pixels`` metadata or plane positions."""
     norm_unit, warning_code = normalize_unit(scene.physical_size_z_unit)
     if scene.physical_size_z is not None and scene.physical_size_z > 0:
+        logger.debug("Scene %s z spacing resolved from Pixels metadata", scene.name)
         return AxisResolution("z", float(scene.physical_size_z), norm_unit, scene.physical_size_z_unit, "pixels", "high", False, warning_code)
 
     z_positions = []
@@ -73,16 +100,19 @@ def _infer_z(scene: SceneXmlMeta) -> AxisResolution:
         if diffs:
             value = statistics.median(diffs)
             norm2, w2 = normalize_unit(raw_unit)
+            logger.info("Scene %s z spacing inferred from Plane.PositionZ deltas", scene.name)
             return AxisResolution("z", float(value), norm2, raw_unit, "plane_delta", "medium", False, w2)
 
+    logger.warning("Scene %s z spacing missing; using fallback 1.0", scene.name)
     warnings.warn(f"z-resolution missing for scene {scene.name}; fallback 1.0", NotImplementedMetadataWarning)
     return AxisResolution("z", 1.0, None, raw_unit, "fallback", "low", True, "z_missing")
 
 
 def _infer_t(scene: SceneXmlMeta, original_metadata: dict[str, str]) -> AxisResolution:
-    """Resolve time spacing from explicit metadata, plane deltas, vendor keys, fallback."""
+    """Resolve temporal spacing from OME and vendor-specific metadata."""
     norm_unit, warning_code = normalize_unit(scene.time_increment_unit)
     if scene.time_increment is not None and scene.time_increment > 0:
+        logger.debug("Scene %s time increment resolved from Pixels metadata", scene.name)
         return AxisResolution("t", float(scene.time_increment), norm_unit, scene.time_increment_unit, "pixels", "high", False, warning_code)
 
     dts = []
@@ -103,6 +133,7 @@ def _infer_t(scene: SceneXmlMeta, original_metadata: dict[str, str]) -> AxisReso
         if diffs:
             val = statistics.median(diffs)
             norm2, w2 = normalize_unit(raw_unit)
+            logger.info("Scene %s time increment inferred from Plane.DeltaT deltas", scene.name)
             return AxisResolution("t", float(val), norm2, raw_unit, "plane_delta", "medium", False, w2)
 
     scene_prefix = scene.name
@@ -124,7 +155,9 @@ def _infer_t(scene: SceneXmlMeta, original_metadata: dict[str, str]) -> AxisReso
         if diffs:
             val = statistics.median(diffs)
             norm3, w3 = normalize_unit(unit_token)
+            logger.info("Scene %s time increment inferred from OriginalMetadata", scene.name)
             return AxisResolution("t", float(val), norm3, unit_token, "original_metadata", "medium", False, w3)
 
+    logger.warning("Scene %s time increment missing; using fallback 1.0", scene.name)
     warnings.warn(f"t-resolution missing for scene {scene.name}; fallback 1.0", NotImplementedMetadataWarning)
     return AxisResolution("t", 1.0, None, raw_unit, "fallback", "low", True, "t_missing")

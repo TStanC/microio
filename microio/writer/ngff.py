@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import math
 import shutil
@@ -14,13 +15,27 @@ from ome_zarr.writer import add_metadata, write_image
 from .xmlparse import SceneXmlMeta
 
 
+logger = logging.getLogger("microio.writer.ngff")
+
+
 def create_root_store(output_path: Path, overwrite: bool = False):
-    """Create a writable zarr root group at ``output_path``."""
+    """Create a writable Zarr root group at the requested output path.
+
+    Parameters
+    ----------
+    output_path:
+        Filesystem path where the OME-Zarr hierarchy will be created.
+    overwrite:
+        When ``True``, an existing directory is removed before the new store is
+        created.
+    """
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {output_path}")
     if output_path.exists() and overwrite:
+        logger.warning("Removing existing output store before rewrite: %s", output_path)
         shutil.rmtree(output_path)
     store = parse_url(str(output_path), mode="w").store
+    logger.info("Created root OME-Zarr store at %s", output_path)
     return zarr.group(store=store)
 
 
@@ -34,7 +49,33 @@ def write_scene_image(
     ngff_version: str = "0.5",
     chunks: tuple[int, int, int, int, int] | None = None,
 ) -> None:
-    """Write one scene image array and NGFF metadata into ``scene_group``."""
+    """Write one scene image pyramid level and NGFF scene metadata.
+
+    Parameters
+    ----------
+    scene_group:
+        Destination scene group under the root OME-Zarr store.
+    data:
+        Array-like image data, expected by the current writer pipeline in
+        ``TCZYX`` order.
+    scene:
+        Scene metadata used to derive OME-Zarr channel labels and colors.
+    axis_scale:
+        Physical scale for the ``t``, ``c``, ``z``, ``y``, and ``x`` axes.
+    axis_units:
+        Unit strings aligned with ``axis_scale``.
+    ngff_version:
+        Target NGFF metadata version string.
+    chunks:
+        Optional chunk shape passed through to the OME-Zarr writer.
+    """
+    logger.info(
+        "Writing scene image %s with shape=%s dtype=%s chunks=%s",
+        scene_group.name,
+        getattr(data, "shape", None),
+        getattr(data, "dtype", None),
+        chunks,
+    )
     axes = [
         {"name": "t", "type": "time", "unit": axis_units[0]},
         {"name": "c", "type": "channel", "unit": None},
@@ -59,6 +100,7 @@ def write_scene_image(
     }
     add_metadata(scene_group, {"omero": omero})
     scene_group.attrs["ome"] = dict(scene_group.attrs.asdict().get("ome", {}), version=ngff_version)
+    logger.debug("Finished writing scene metadata for %s", scene_group.name)
 
 
 def write_root_ome_group(
@@ -71,7 +113,7 @@ def write_root_ome_group(
     *,
     ngff_version: str = "0.5",
 ) -> None:
-    """Write root OME attrs plus bioformats2raw-style ``OME`` sidecar group."""
+    """Write root-level OME-Zarr metadata and the ``OME/METADATA.ome.xml`` sidecar."""
     root.attrs["ome"] = {"version": ngff_version, "bioformats2raw.layout": 3}
 
     ome_group = root.require_group("OME")
@@ -85,10 +127,11 @@ def write_root_ome_group(
     metadata_xml_path = Path(ome_group.store.root) / ome_group.path / "METADATA.ome.xml"
     metadata_xml_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_xml_path.write_text(ome_xml, encoding="utf-8")
+    logger.info("Wrote OME sidecar XML for %d scenes to %s", len(scenes), metadata_xml_path)
 
 
 def _build_omero_channels(data, scene: SceneXmlMeta) -> list[dict]:
-    """Build OME-Zarr ``omero.channels`` metadata for the current scene."""
+    """Build OME-Zarr ``omero.channels`` metadata for one scene."""
     channel_count = int(data.shape[1])
     channel_defs = scene.channels[:channel_count]
     stats = _sample_channel_windows(data)
@@ -115,7 +158,7 @@ def _build_omero_channels(data, scene: SceneXmlMeta) -> list[dict]:
 
 
 def _sample_channel_windows(data) -> list[tuple[float, float]]:
-    """Estimate visualization windows from a sparse sample of each channel."""
+    """Estimate display windows from a sparse per-channel sample."""
     sample = _sample_data(data)
     windows: list[tuple[float, float]] = []
     channel_count = int(sample.shape[1])
@@ -141,10 +184,11 @@ def _sample_channel_windows(data) -> list[tuple[float, float]]:
 
 
 def _sample_data(data, target_values: int = 262144):
-    """Subsample TCZYX data before computing visualization statistics."""
+    """Subsample ``TCZYX`` data before computing display statistics."""
     t, c, z, y, x = (int(v) for v in data.shape)
     total_values = max(1, t * c * z * y * x)
     stride = max(1, int(math.ceil((total_values / target_values) ** 0.25)))
+    logger.debug("Sampling data for OMERO windows with stride=%d target_values=%d", stride, target_values)
     sampled = data[::stride, :, ::stride, ::stride, ::stride]
     return np.asarray(sampled.compute() if hasattr(sampled, "compute") else sampled)
 
