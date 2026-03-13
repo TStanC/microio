@@ -15,13 +15,34 @@ def _cmd_inspect(args) -> int:
     payload = {
         "path": str(ds.path),
         "root": ds.read_root_metadata(),
+        "scene_refs": [scene.__dict__ for scene in ds.list_scene_refs()],
         "scenes": {},
     }
-    for scene_id in ds.list_scenes():
-        payload["scenes"][scene_id] = {
-            "metadata": ds.read_scene_metadata(scene_id),
-            "ome": ds.read_scene_ome_metadata(scene_id).__dict__,
+    for ref in ds.list_scene_refs():
+        report = ds.validate_scene_data_flow(ref.id)
+        try:
+            levels = [level.__dict__ for level in ds.list_levels(ref.id)]
+        except Exception as exc:
+            levels = []
+            level_error = {"code": "multiscale_invalid", "message": str(exc)}
+        else:
+            level_error = None
+        scene_payload = {
+            "ref": ref.__dict__,
+            "metadata": ds.read_scene_metadata(ref.id),
+            "levels": levels,
+            "data_flow": {
+                "warnings": [message.__dict__ for message in report.warnings],
+                "errors": [message.__dict__ for message in report.errors],
+            },
         }
+        if level_error is not None:
+            scene_payload["level_error"] = level_error
+        try:
+            scene_payload["ome"] = ds.read_scene_ome_metadata(ref.id).__dict__
+        except FileNotFoundError:
+            scene_payload["ome"] = None
+        payload["scenes"][ref.id] = scene_payload
     print(json.dumps(payload, indent=2, default=str))
     return 0
 

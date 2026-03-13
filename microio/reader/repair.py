@@ -16,10 +16,11 @@ from microio.reader.metadata import multiscale_metadata, scene_metadata, scene_o
 logger = logging.getLogger("microio.reader.repair")
 
 
-def inspect_axis_metadata(ds, scene_id: str) -> RepairReport:
+def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
     """Validate one scene's multiscale axis metadata without mutating the store."""
-    scene_md = scene_metadata(ds, scene_id, corrected=False)
-    ms = multiscale_metadata(ds, scene_id)
+    ref = ds.scene_ref(scene_id)
+    scene_md = scene_metadata(ds, ref.id, corrected=False)
+    ms = multiscale_metadata(ds, ref.id)
     warnings: list[ValidationMessage] = []
     errors: list[ValidationMessage] = []
     axis_states: dict[str, AxisState] = {}
@@ -48,15 +49,15 @@ def inspect_axis_metadata(ds, scene_id: str) -> RepairReport:
         )
         axis_states[axis] = state
         if axis in {"x", "y"}:
-            xy_error = _validate_xy_axis(scene_id, axis, level_values, unit, raw_unit, datasets)
+            xy_error = _validate_xy_axis(ref.id, axis, level_values, unit, raw_unit, datasets)
             if xy_error is not None:
                 errors.append(xy_error)
         elif axis == "z":
-            z_error = _validate_scene_wide_placeholder(axis, level_values, unit, datasets, scene_id)
+            z_error = _validate_scene_wide_placeholder(axis, level_values, unit, datasets, ref.id)
             if z_error is not None:
                 errors.append(z_error)
         elif axis == "t":
-            t_error = _validate_scene_wide_placeholder(axis, level_values, unit, datasets, scene_id)
+            t_error = _validate_scene_wide_placeholder(axis, level_values, unit, datasets, ref.id)
             if t_error is not None:
                 errors.append(t_error)
 
@@ -65,28 +66,29 @@ def inspect_axis_metadata(ds, scene_id: str) -> RepairReport:
             ValidationMessage(
                 level="warning",
                 code="t_unresolved",
-                message=f"Scene {scene_id} has placeholder t metadata; automatic scalar repair is conservative.",
+                message=f"Scene {ref.id} has placeholder t metadata; automatic scalar repair is conservative.",
             )
         )
 
     try:
-        scene_ome_metadata(ds, scene_id)
+        scene_ome_metadata(ds, ref.id)
     except FileNotFoundError:
         warnings.append(
             ValidationMessage(
                 level="warning",
                 code="ome_xml_missing",
-                message=f"Scene {scene_id} cannot be repaired because OME/METADATA.ome.xml is missing.",
+                message=f"Scene {ref.id} cannot be repaired because OME/METADATA.ome.xml is missing.",
             )
         )
 
     _attach_existing_repair(scene_md, axis_states)
-    return RepairReport(scene_id=scene_id, persisted=False, axis_states=axis_states, warnings=warnings, errors=errors)
+    return RepairReport(scene_id=ref.id, persisted=False, axis_states=axis_states, warnings=warnings, errors=errors)
 
 
-def repair_axis_metadata(ds, scene_id: str, *, persist: bool = True) -> RepairReport:
+def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> RepairReport:
     """Safely repair scene-level t/z metadata when stronger evidence exists."""
-    report = inspect_axis_metadata(ds, scene_id)
+    ref = ds.scene_ref(scene_id)
+    report = inspect_axis_metadata(ds, ref.id)
     if report.errors:
         return report
 
@@ -96,10 +98,10 @@ def repair_axis_metadata(ds, scene_id: str, *, persist: bool = True) -> RepairRe
     repaired_axes: dict[str, AxisState] = {}
 
     try:
-        ome_scene = scene_ome_metadata(ds, scene_id)
+        ome_scene = scene_ome_metadata(ds, ref.id)
     except FileNotFoundError:
         return RepairReport(
-            scene_id=scene_id,
+            scene_id=ref.id,
             persisted=False,
             axis_states=axis_states,
             warnings=warnings,
@@ -107,14 +109,14 @@ def repair_axis_metadata(ds, scene_id: str, *, persist: bool = True) -> RepairRe
         )
 
     if axis_states["z"].placeholder:
-        repaired_z, z_messages = _resolve_z_axis(scene_id, ome_scene)
+        repaired_z, z_messages = _resolve_z_axis(ref.id, ome_scene)
         warnings.extend(z_messages)
         if repaired_z is not None:
             axis_states["z"] = repaired_z
             repaired_axes["z"] = repaired_z
 
     if axis_states["t"].placeholder:
-        repaired_t, t_messages = _resolve_t_axis(scene_id, ome_scene)
+        repaired_t, t_messages = _resolve_t_axis(ref.id, ome_scene)
         warnings.extend(t_messages)
         if repaired_t is not None:
             axis_states["t"] = repaired_t
@@ -123,9 +125,9 @@ def repair_axis_metadata(ds, scene_id: str, *, persist: bool = True) -> RepairRe
     persisted = False
     if persist and repaired_axes:
         _require_writable(ds)
-        scene = ds.root[scene_id]
+        scene = ds.root[ref.id]
         attrs = deepcopy(scene.attrs.asdict())
-        _apply_scene_axis_repairs(attrs, repaired_axes, scene_id)
+        _apply_scene_axis_repairs(attrs, repaired_axes, ref.id)
         microio = dict(attrs.get("microio", {}))
         repair_block = dict(microio.get("repair", {}))
         repair_block["schema_version"] = MICROIO_SCHEMA_VERSION
@@ -146,7 +148,7 @@ def repair_axis_metadata(ds, scene_id: str, *, persist: bool = True) -> RepairRe
         persisted = True
 
     return RepairReport(
-        scene_id=scene_id,
+        scene_id=ref.id,
         persisted=persisted,
         axis_states=axis_states,
         warnings=warnings,

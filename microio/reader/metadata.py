@@ -1,4 +1,4 @@
-"""Metadata accessors and OME-XML-backed scene lookup helpers."""
+"""Metadata accessors and validated scene/level lookup helpers."""
 
 from __future__ import annotations
 
@@ -6,14 +6,313 @@ from functools import lru_cache
 import logging
 from pathlib import Path
 
+from microio.common.models import DataFlowReport, LevelRef, SceneRef, ValidationMessage
 from microio.reader.ome_xml import OmeDocument, parse_ome_xml
 
 
 logger = logging.getLogger("microio.reader.metadata")
 
+EXPECTED_AXES = ("t", "c", "z", "y", "x")
+
+
+def list_scene_refs(ds) -> list[SceneRef]:
+    scene_ids = _ordered_scene_ids(ds)
+    scenes: list[SceneRef] = []
+    names: list[str] = []
+    for index, scene_id in enumerate(scene_ids):
+        name = _scene_name(ds, scene_id)
+        names.append(name)
+        scenes.append(
+            SceneRef(
+                id=scene_id,
+                index=index,
+                name=name,
+                group_path=scene_id,
+                ome_index=_resolve_ome_index(ds, scene_id, dataset_index=index, scene_name=name),
+            )
+        )
+
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+
+    return [
+        SceneRef(
+            id=scene.id,
+            index=scene.index,
+            name=scene.name,
+            group_path=scene.group_path,
+            ome_index=scene.ome_index,
+            duplicate_name_count=counts[scene.name],
+        )
+        for scene in scenes
+    ]
+
 
 def list_scenes(ds) -> list[str]:
     """List scene ids in stable dataset order."""
+    return [scene.id for scene in list_scene_refs(ds)]
+
+
+def scene_ref(ds, scene: int | str) -> SceneRef:
+    refs = list_scene_refs(ds)
+    if isinstance(scene, int):
+        if 0 <= scene < len(refs):
+            return refs[scene]
+        raise KeyError(f"Scene index {scene} is out of range for dataset with {len(refs)} scenes")
+
+    scene_text = str(scene)
+    for ref in refs:
+        if ref.id == scene_text:
+            return ref
+
+    name_matches = [ref for ref in refs if ref.name == scene_text]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    if len(name_matches) > 1:
+        ids = [ref.id for ref in name_matches]
+        raise KeyError(f"Scene name {scene_text!r} is ambiguous; matching ids={ids}")
+
+    available = [ref.id for ref in refs]
+    raise KeyError(f"Unknown scene reference {scene!r}; available scene ids={available}")
+
+
+def classify_scene_reference(ds, value: int | str) -> str:
+    if isinstance(value, int):
+        return "index" if is_scene_index(ds, value) else "unknown"
+
+    value_text = str(value)
+    if is_scene_id(ds, value_text):
+        return "id"
+    matches = scene_name_matches(ds, value_text)
+    if len(matches) == 1:
+        return "name"
+    if len(matches) > 1:
+        return "ambiguous_name"
+    return "unknown"
+
+
+def is_scene_id(ds, value: str) -> bool:
+    value_text = str(value)
+    return any(ref.id == value_text for ref in list_scene_refs(ds))
+
+
+def is_scene_index(ds, value: int) -> bool:
+    return any(ref.index == int(value) for ref in list_scene_refs(ds))
+
+
+def scene_id_to_index(ds, scene_id: str) -> int:
+    return scene_ref(ds, str(scene_id)).index
+
+
+def scene_index_to_id(ds, index: int) -> str:
+    return scene_ref(ds, int(index)).id
+
+
+def scene_name_matches(ds, name: str) -> list[SceneRef]:
+    name_text = str(name)
+    return [ref for ref in list_scene_refs(ds) if ref.name == name_text]
+
+
+def root_metadata(ds) -> dict:
+    return ds.root.attrs.asdict()
+
+
+def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
+    ref = scene_ref(ds, scene)
+    attrs = ds.root[ref.id].attrs.asdict()
+    if corrected:
+        return attrs
+    return attrs
+
+
+def multiscale_metadata(ds, scene: int | str) -> dict:
+    ref = scene_ref(ds, scene)
+    attrs = ds.root[ref.id].attrs.asdict()
+    multiscales = attrs.get("multiscales")
+    if not isinstance(multiscales, list) or not multiscales:
+        raise ValueError(f"Scene {ref.id} has no multiscales metadata")
+    multiscale = multiscales[0]
+    _validate_multiscale_axes(ref.id, multiscale)
+    return multiscale
+
+
+def list_levels(ds, scene: int | str) -> list[LevelRef]:
+    ref = scene_ref(ds, scene)
+    scene_group = ds.root[ref.id]
+    multiscale = multiscale_metadata(ds, ref.id)
+    axes = tuple(axis["name"] for axis in multiscale["axes"])
+    axis_units = tuple(axis.get("unit") for axis in multiscale["axes"])
+    levels: list[LevelRef] = []
+    previous_shape: tuple[int, ...] | None = None
+
+    for level_index, dataset in enumerate(multiscale["datasets"]):
+        path = str(dataset.get("path"))
+        if path not in scene_group:
+            raise ValueError(f"Scene {ref.id} level {path!r} is listed in multiscales but missing from the Zarr group")
+        transforms = dataset.get("coordinateTransformations")
+        if not isinstance(transforms, list) or not transforms:
+            raise ValueError(f"Scene {ref.id} level {path!r} has no coordinate transformations")
+        scale = transforms[0].get("scale")
+        if not isinstance(scale, list):
+            raise ValueError(f"Scene {ref.id} level {path!r} has malformed scale metadata")
+        if len(scale) != len(axes):
+            raise ValueError(
+                f"Scene {ref.id} level {path!r} scale length {len(scale)} does not match axis count {len(axes)}"
+            )
+        array = scene_group[path]
+        shape = tuple(int(dim) for dim in array.shape)
+        if len(shape) != len(axes):
+            raise ValueError(
+                f"Scene {ref.id} level {path!r} ndim {len(shape)} does not match multiscale axis count {len(axes)}"
+            )
+        if previous_shape is not None:
+            _validate_pyramid_shapes(ref.id, path, previous_shape, shape, axes)
+        previous_shape = shape
+        levels.append(
+            LevelRef(
+                scene_id=ref.id,
+                level_index=level_index,
+                path=path,
+                shape=shape,
+                dtype=str(array.dtype),
+                scale=tuple(float(value) for value in scale),
+                axis_names=axes,
+                axis_units=axis_units,
+            )
+        )
+    return levels
+
+
+def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
+    ref = scene_ref(ds, scene)
+    levels = list_levels(ds, ref.id)
+    if isinstance(level, int):
+        if 0 <= level < len(levels):
+            return levels[level]
+        raise KeyError(f"Scene {ref.id} level index {level} is out of range; available=0..{len(levels) - 1}")
+
+    level_text = str(level)
+    for candidate in levels:
+        if candidate.path == level_text:
+            return candidate
+    raise KeyError(f"Scene {ref.id} has no level path {level_text!r}; available={[item.path for item in levels]}")
+
+
+def read_level(ds, scene: int | str, level: int | str = 0, *, as_array: bool = False):
+    ref = scene_ref(ds, scene)
+    level_info = level_ref(ds, ref.id, level)
+    array = ds.root[ref.id][level_info.path]
+    if as_array:
+        return array[:]
+    return array
+
+
+def read_ome_xml(ds) -> str:
+    xml_path = _ome_xml_path(ds.path)
+    if not xml_path.exists():
+        raise FileNotFoundError(f"Missing OME sidecar XML: {xml_path}")
+    return xml_path.read_text(encoding="utf-8", errors="replace")
+
+
+def scene_ome_metadata(ds, scene: int | str):
+    ref = scene_ref(ds, scene)
+    document = read_ome_document(ds.path)
+    if ref.ome_index is not None and 0 <= ref.ome_index < len(document.scenes):
+        candidate = document.scenes[ref.ome_index]
+        if ref.name and candidate.name != ref.name and ref.duplicate_name_count == 1:
+            logger.warning(
+                "Scene %s matched XML by index but name differs: zarr=%r xml=%r",
+                ref.id,
+                ref.name,
+                candidate.name,
+            )
+        return candidate
+
+    unique_matches = [item for item in document.scenes if item.name == ref.name]
+    if len(unique_matches) == 1:
+        return unique_matches[0]
+    raise KeyError(f"Could not match scene {ref.id!r} to OME-XML metadata")
+
+
+def original_metadata(ds) -> dict[str, str]:
+    return read_ome_document(ds.path).original_metadata
+
+
+def validate_scene_data_flow(ds, scene: int | str) -> DataFlowReport:
+    ref = scene_ref(ds, scene)
+    warnings: list[ValidationMessage] = []
+    errors: list[ValidationMessage] = []
+    try:
+        levels = list_levels(ds, ref.id)
+    except Exception as exc:
+        errors.append(
+            ValidationMessage(
+                level="error",
+                code="multiscale_invalid",
+                message=f"Scene {ref.id} multiscale/array validation failed: {exc}",
+            )
+        )
+        levels = []
+
+    if ref.duplicate_name_count > 1:
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code="duplicate_scene_name",
+                message=f"Scene {ref.id} uses non-unique name {ref.name!r}; name-based reads must be disambiguated.",
+            )
+        )
+
+    try:
+        ome_scene = scene_ome_metadata(ds, ref.id)
+    except FileNotFoundError:
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code="ome_xml_missing",
+                message=f"Scene {ref.id} has no OME sidecar XML; OME-backed validation is unavailable.",
+            )
+        )
+    except KeyError as exc:
+        errors.append(ValidationMessage(level="error", code="ome_scene_unmatched", message=str(exc)))
+    else:
+        if levels:
+            level0 = levels[0]
+            expected_shape = (
+                int(ome_scene.size_t),
+                int(ome_scene.size_c),
+                int(ome_scene.size_z),
+                int(ome_scene.size_y),
+                int(ome_scene.size_x),
+            )
+            if level0.shape != expected_shape:
+                errors.append(
+                    ValidationMessage(
+                        level="error",
+                        code="ome_shape_mismatch",
+                        message=f"Scene {ref.id} level 0 shape {level0.shape} does not match OME Pixels sizes {expected_shape}.",
+                    )
+                )
+            if ref.name != ome_scene.name and ref.duplicate_name_count == 1:
+                warnings.append(
+                    ValidationMessage(
+                        level="warning",
+                        code="scene_name_mismatch",
+                        message=f"Scene {ref.id} multiscale name {ref.name!r} differs from OME name {ome_scene.name!r}.",
+                    )
+                )
+
+    return DataFlowReport(scene=ref, levels=levels, warnings=warnings, errors=errors)
+
+
+@lru_cache(maxsize=16)
+def read_ome_document(dataset_path: Path) -> OmeDocument:
+    logger.debug("Parsing OME-XML for %s", dataset_path)
+    return parse_ome_xml(_ome_xml_path(dataset_path).read_text(encoding="utf-8", errors="replace"))
+
+
+def _ordered_scene_ids(ds) -> list[str]:
     ome_group = ds.root.get("OME")
     if ome_group is not None:
         attrs = ome_group.attrs.asdict()
@@ -25,72 +324,73 @@ def list_scenes(ds) -> list[str]:
     return sorted(names, key=_natural_key)
 
 
-def root_metadata(ds) -> dict:
-    return ds.root.attrs.asdict()
-
-
-def scene_metadata(ds, scene_id: str, *, corrected: bool = True) -> dict:
-    attrs = ds.root[scene_id].attrs.asdict()
-    if corrected:
-        return attrs
-    return attrs
-
-
-def multiscale_metadata(ds, scene_id: str) -> dict:
+def _scene_name(ds, scene_id: str) -> str:
     attrs = ds.root[scene_id].attrs.asdict()
     multiscales = attrs.get("multiscales")
-    if not isinstance(multiscales, list) or not multiscales:
-        raise ValueError(f"Scene {scene_id} has no multiscales metadata")
-    return multiscales[0]
+    if isinstance(multiscales, list) and multiscales:
+        return str(multiscales[0].get("name") or scene_id)
+    return str(scene_id)
 
 
-def read_ome_xml(ds) -> str:
-    xml_path = _ome_xml_path(ds.path)
-    if not xml_path.exists():
-        raise FileNotFoundError(f"Missing OME sidecar XML: {xml_path}")
-    return xml_path.read_text(encoding="utf-8", errors="replace")
+def _resolve_ome_index(ds, scene_id: str, *, dataset_index: int, scene_name: str) -> int | None:
+    try:
+        document = read_ome_document(ds.path)
+    except FileNotFoundError:
+        return None
+
+    if scene_id.isdigit():
+        candidate = int(scene_id)
+        if 0 <= candidate < len(document.scenes):
+            return candidate
+
+    if 0 <= dataset_index < len(document.scenes) and document.scenes[dataset_index].name == scene_name:
+        return dataset_index
+
+    matches = [item.index for item in document.scenes if item.name == scene_name]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
-def scene_ome_metadata(ds, scene_id: str):
-    document = read_ome_document(ds.path)
-    scene = _match_scene_to_xml(ds, scene_id, document)
-    return scene
+def _validate_multiscale_axes(scene_id: str, multiscale: dict) -> None:
+    axes = multiscale.get("axes")
+    datasets = multiscale.get("datasets")
+    if not isinstance(axes, list) or not axes:
+        raise ValueError(f"Scene {scene_id} has no multiscale axes metadata")
+    if not isinstance(datasets, list) or not datasets:
+        raise ValueError(f"Scene {scene_id} has no multiscale datasets metadata")
+
+    axis_names = [axis.get("name") for axis in axes]
+    if any(not isinstance(name, str) or not name for name in axis_names):
+        raise ValueError(f"Scene {scene_id} has unnamed multiscale axes")
+    if len(set(axis_names)) != len(axis_names):
+        raise ValueError(f"Scene {scene_id} has duplicate multiscale axes: {axis_names}")
+    if tuple(axis_names) != EXPECTED_AXES:
+        raise ValueError(f"Scene {scene_id} uses unsupported axis order {axis_names}; expected {list(EXPECTED_AXES)}")
 
 
-def original_metadata(ds) -> dict[str, str]:
-    return read_ome_document(ds.path).original_metadata
-
-
-@lru_cache(maxsize=16)
-def read_ome_document(dataset_path: Path) -> OmeDocument:
-    logger.debug("Parsing OME-XML for %s", dataset_path)
-    return parse_ome_xml(_ome_xml_path(dataset_path).read_text(encoding="utf-8", errors="replace"))
+def _validate_pyramid_shapes(
+    scene_id: str,
+    level_path: str,
+    previous_shape: tuple[int, ...],
+    current_shape: tuple[int, ...],
+    axes: tuple[str, ...],
+) -> None:
+    for axis_name, previous_dim, current_dim in zip(axes, previous_shape, current_shape):
+        if current_dim <= 0:
+            raise ValueError(f"Scene {scene_id} level {level_path!r} axis {axis_name} has invalid size {current_dim}")
+        if axis_name in {"y", "x"} and current_dim > previous_dim:
+            raise ValueError(
+                f"Scene {scene_id} level {level_path!r} axis {axis_name} grows from {previous_dim} to {current_dim}"
+            )
+        if axis_name in {"t", "c", "z"} and current_dim > previous_dim:
+            raise ValueError(
+                f"Scene {scene_id} level {level_path!r} axis {axis_name} grows from {previous_dim} to {current_dim}"
+            )
 
 
 def _ome_xml_path(dataset_path: Path) -> Path:
     return Path(dataset_path) / "OME" / "METADATA.ome.xml"
-
-
-def _match_scene_to_xml(ds, scene_id: str, document: OmeDocument):
-    multiscale_name = multiscale_metadata(ds, scene_id).get("name")
-    if str(scene_id).isdigit():
-        idx = int(scene_id)
-        if 0 <= idx < len(document.scenes):
-            candidate = document.scenes[idx]
-            if multiscale_name and candidate.name != multiscale_name:
-                logger.warning(
-                    "Scene %s matched XML by index but name differs: zarr=%r xml=%r",
-                    scene_id,
-                    multiscale_name,
-                    candidate.name,
-                )
-            return candidate
-
-    if multiscale_name:
-        for scene in document.scenes:
-            if scene.name == multiscale_name:
-                return scene
-    raise KeyError(f"Could not match scene {scene_id!r} to OME-XML metadata")
 
 
 def _natural_key(text: str):

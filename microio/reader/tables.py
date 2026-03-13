@@ -11,23 +11,26 @@ import numpy as np
 from microio.common.constants import AXES_TRAJECTORY_TABLE_NAME, MICROIO_TABLE_SCHEMA_VERSION
 from microio.common.models import PlaneTableReport, ValidationMessage
 from microio.common.units import normalize_unit
-from microio.reader.metadata import multiscale_metadata, scene_ome_metadata
+from microio.reader.metadata import scene_ome_metadata
 
 
 logger = logging.getLogger("microio.reader.tables")
 
 
-def load_plane_table(ds, scene_id: str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict[str, np.ndarray]:
-    table = ds.root[scene_id]["tables"][table_name]
+def load_plane_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict[str, np.ndarray]:
+    ref = ds.scene_ref(scene_id)
+    table = ds.root[ref.id]["tables"][table_name]
     return {key: arr[:] for key, arr in table.arrays()}
 
 
-def read_table_metadata(ds, scene_id: str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict:
-    return ds.root[scene_id]["tables"][table_name].attrs.asdict()
+def read_table_metadata(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict:
+    ref = ds.scene_ref(scene_id)
+    return ds.root[ref.id]["tables"][table_name].attrs.asdict()
 
 
-def build_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, persist: bool = False):
-    ome_scene = scene_ome_metadata(ds, scene_id)
+def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, persist: bool = False):
+    ref = ds.scene_ref(scene_id)
+    ome_scene = scene_ome_metadata(ds, ref.id)
     row_count = max(1, ome_scene.size_t * ome_scene.size_c * ome_scene.size_z)
     warnings: list[ValidationMessage] = []
     expected_rows = ome_scene.size_t * ome_scene.size_c * ome_scene.size_z
@@ -39,7 +42,7 @@ def build_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TA
                 level="warning",
                 code="plane_count_mismatch",
                 message=(
-                    f"Scene {scene_id} expected {expected_rows} planes but observed {observed_rows} "
+                    f"Scene {ref.id} expected {expected_rows} planes but observed {observed_rows} "
                     f"({relation} plane metadata)."
                 ),
             )
@@ -73,13 +76,13 @@ def build_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TA
                 ValidationMessage(
                     level="warning",
                     code="plane_index_out_of_bounds",
-                    message=f"Scene {scene_id} has out-of-bounds plane metadata at (t={t}, c={c}, z={z}).",
+                    message=f"Scene {ref.id} has out-of-bounds plane metadata at (t={t}, c={c}, z={z}).",
                 )
             )
             continue
         idx = _flat_index(t, c, z, size_c=ome_scene.size_c, size_z=ome_scene.size_z)
         if plane_rows[idx] is not None:
-            raise ValueError(f"Duplicate plane metadata for scene {scene_id} at (t={t}, c={c}, z={z})")
+            raise ValueError(f"Duplicate plane metadata for scene {ref.id} at (t={t}, c={c}, z={z})")
         plane_rows[idx] = plane
         positioners_t[idx] = _safe_float(plane.get("DeltaT"))
         positioners_z[idx] = _safe_float(plane.get("PositionZ"))
@@ -96,7 +99,7 @@ def build_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TA
         "positioners_x": positioners_x,
     }
     report = PlaneTableReport(
-        scene_id=scene_id,
+        scene_id=ref.id,
         table_name=table_name,
         row_count=row_count,
         persisted=False,
@@ -104,24 +107,25 @@ def build_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TA
     )
     if persist:
         _require_writable(ds)
-        _persist_table(ds, scene_id, table_name, data, ome_scene, warnings)
+        _persist_table(ds, ref.id, table_name, data, ome_scene, warnings)
         report.persisted = True
     return data, report
 
 
-def ensure_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, rebuild: bool = False):
-    scene = ds.root[scene_id]
+def ensure_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, rebuild: bool = False):
+    ref = ds.scene_ref(scene_id)
+    scene = ds.root[ref.id]
     if not rebuild and "tables" in scene and table_name in scene["tables"]:
         metadata = scene["tables"][table_name].attrs.asdict()
         if metadata.get("schema_version") == MICROIO_TABLE_SCHEMA_VERSION:
-            table = load_plane_table(ds, scene_id, table_name=table_name)
+            table = load_plane_table(ds, ref.id, table_name=table_name)
             return table, PlaneTableReport(
-                scene_id=scene_id,
+                scene_id=ref.id,
                 table_name=table_name,
                 row_count=len(next(iter(table.values()))) if table else 0,
                 persisted=False,
             )
-    return build_plane_table(ds, scene_id, table_name=table_name, persist=True)
+    return build_plane_table(ds, ref.id, table_name=table_name, persist=True)
 
 
 def _persist_table(ds, scene_id: str, table_name: str, data: dict[str, np.ndarray], ome_scene, warnings: list[ValidationMessage]) -> None:

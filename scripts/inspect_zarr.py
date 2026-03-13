@@ -13,12 +13,16 @@ def main() -> int:
 
     ds = open_dataset(args.input)
     pprint(ds.read_root_metadata())
-    for scene in ds.list_scenes():
-        print("\\nScene:", scene)
-        md = ds.read_scene_metadata(scene)
+    for ref in ds.list_scene_refs():
+        print("\\nScene:", ref.id, "index=", ref.index, "name=", ref.name)
+        md = ds.read_scene_metadata(ref.id)
         pprint({k: md[k] for k in md.keys() if k in ("ome", "microio", "bioformats2raw.layout")})
         try:
-            tbl = ds.read_table(scene, "axes_trajectory")
+            pprint([level.__dict__ for level in ds.list_levels(ref.id)])
+        except Exception as exc:
+            print("Level validation error:", exc)
+        try:
+            tbl = ds.load_plane_table(ref.id, "axes_trajectory")
             print("axes_trajectory columns:", list(tbl.keys()))
         except Exception as exc:
             print("No axes_trajectory table:", exc)

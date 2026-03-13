@@ -25,6 +25,7 @@ def read_microio_extras(ds: DatasetHandle, scene_id: str) -> dict:
     dict
         The stored ``microio`` metadata block, or an empty dictionary if absent.
     """
-    attrs = ds.root[scene_id].attrs.asdict()
-    logger.debug("Reading microio extras for scene %s", scene_id)
+    ref = ds.scene_ref(scene_id)
+    attrs = ds.root[ref.id].attrs.asdict()
+    logger.debug("Reading microio extras for scene %s", ref.id)
     return attrs.get("microio", {})
