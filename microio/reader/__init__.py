@@ -1,4 +1,4 @@
-"""Reader API exports for Java-free OME-Zarr access."""
+"""Reader API exports for OME-Zarr access and enrichment."""
 
 from .open import open_dataset
 

@@ -1,4 +1,4 @@
-"""Dataset opening helpers for OME-Zarr readers."""
+"""Dataset opening helpers for bioformats2raw OME-Zarr datasets."""
 
 from __future__ import annotations
 
@@ -13,21 +13,9 @@ from microio.common.models import DatasetHandle
 logger = logging.getLogger("microio.reader.open")
 
 
-def open_dataset(path: str | Path) -> DatasetHandle:
-    """Open an OME-Zarr dataset in read-only mode.
-
-    Parameters
-    ----------
-    path:
-        Path to the root directory of an existing Zarr or OME-Zarr dataset.
-
-    Returns
-    -------
-    DatasetHandle
-        Thin handle exposing convenience methods for scene, metadata, table,
-        and array access.
-    """
-    p = Path(path)
-    logger.info("Opening dataset for reading: %s", p)
-    root = zarr.open(p, mode="r")
-    return DatasetHandle(path=p, root=root)
+def open_dataset(path: str | Path, *, mode: str = "r") -> DatasetHandle:
+    """Open an existing OME-Zarr dataset."""
+    dataset_path = Path(path)
+    logger.info("Opening dataset %s with mode=%s", dataset_path, mode)
+    root = zarr.open(dataset_path, mode=mode)
+    return DatasetHandle(path=dataset_path, root=root, mode=mode)

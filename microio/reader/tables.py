@@ -1,119 +1,195 @@
-"""Reader helpers for microio table groups."""
+"""Plane-table loading and generation for existing OME-Zarr scenes."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
+import math
+
 import numpy as np
 
-from microio.common.models import DatasetHandle
+from microio.common.constants import AXES_TRAJECTORY_TABLE_NAME, MICROIO_TABLE_SCHEMA_VERSION
+from microio.common.models import PlaneTableReport, ValidationMessage
+from microio.common.units import normalize_unit
+from microio.reader.metadata import multiscale_metadata, scene_ome_metadata
 
 
 logger = logging.getLogger("microio.reader.tables")
 
 
-def read_table(ds: DatasetHandle, scene_id: str, table_name: str) -> dict[str, np.ndarray]:
-    """Read a complete table group into memory.
-
-    Parameters
-    ----------
-    ds:
-        Open dataset handle.
-    scene_id:
-        Scene identifier containing the table group.
-    table_name:
-        Table name under ``scene/tables``.
-
-    Returns
-    -------
-    dict[str, numpy.ndarray]
-        Mapping from column name to eagerly loaded NumPy array.
-    """
+def load_plane_table(ds, scene_id: str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict[str, np.ndarray]:
     table = ds.root[scene_id]["tables"][table_name]
-    out: dict[str, np.ndarray] = {}
-    for key, arr in table.arrays():
-        out[key] = arr[:]
-        logger.debug("Read table column %s from %s/%s with %d rows", key, scene_id, table_name, len(out[key]))
-    return out
+    return {key: arr[:] for key, arr in table.arrays()}
 
 
-def read_table_metadata(ds: DatasetHandle, scene_id: str, table_name: str) -> dict:
-    """Read table-group attributes as a plain dictionary.
-
-    Parameters
-    ----------
-    ds:
-        Open dataset handle.
-    scene_id:
-        Scene identifier containing the table.
-    table_name:
-        Table name under ``scene/tables``.
-
-    Returns
-    -------
-    dict
-        Table metadata dictionary.
-    """
-    logger.debug("Reading table metadata for %s/%s", scene_id, table_name)
-    table = ds.root[scene_id]["tables"][table_name]
-    return table.attrs.asdict()
+def read_table_metadata(ds, scene_id: str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict:
+    return ds.root[scene_id]["tables"][table_name].attrs.asdict()
 
 
-def build_axis_positions(
-    ds: DatasetHandle,
-    scene_id: str,
-    axis: str,
-    *,
-    table_name: str = "axes_trajectory",
-    spacing: float | None = None,
-    origin: float = 0.0,
-    order=None,
-) -> np.ndarray:
-    """Construct synthetic axis positions from logical indices and spacing.
+def build_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, persist: bool = False):
+    ome_scene = scene_ome_metadata(ds, scene_id)
+    row_count = max(1, ome_scene.size_t * ome_scene.size_c * ome_scene.size_z)
+    warnings: list[ValidationMessage] = []
+    expected_rows = ome_scene.size_t * ome_scene.size_c * ome_scene.size_z
+    observed_rows = len(ome_scene.planes)
+    if observed_rows != expected_rows:
+        relation = "missing" if observed_rows < expected_rows else "extra"
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code="plane_count_mismatch",
+                message=(
+                    f"Scene {scene_id} expected {expected_rows} planes but observed {observed_rows} "
+                    f"({relation} plane metadata)."
+                ),
+            )
+        )
 
-    Parameters
-    ----------
-    ds:
-        Open dataset handle.
-    scene_id:
-        Scene identifier containing the table.
-    axis:
-        Axis name, one of ``t``, ``c``, ``z``, ``y``, or ``x``.
-    table_name:
-        Table name under ``scene/tables`` used as the source of ordering
-        columns.
-    spacing:
-        Optional spacing override. When omitted, spacing is read from the
-        ``microio.axis_resolution`` scene metadata and defaults to ``1.0``.
-    origin:
-        Offset added to every generated coordinate.
-    order:
-        Optional explicit logical-order vector. When omitted, the function uses
-        ``the_<axis>`` from the table when available.
+    the_t = np.zeros(row_count, dtype=np.int32)
+    the_c = np.zeros(row_count, dtype=np.int32)
+    the_z = np.zeros(row_count, dtype=np.int32)
+    positioners_t = np.full(row_count, np.nan, dtype=np.float64)
+    positioners_z = np.full(row_count, np.nan, dtype=np.float64)
+    positioners_y = np.full(row_count, np.nan, dtype=np.float64)
+    positioners_x = np.full(row_count, np.nan, dtype=np.float64)
+    plane_rows: list[dict[str, str | None] | None] = [None] * row_count
 
-    Returns
-    -------
-    numpy.ndarray
-        Generated one-dimensional coordinate vector aligned to table rows.
-    """
-    axis = axis.lower()
-    if axis not in {"t", "c", "z", "y", "x"}:
-        raise ValueError(f"Unsupported axis: {axis}")
+    for t in range(ome_scene.size_t):
+        for c in range(ome_scene.size_c):
+            for z in range(ome_scene.size_z):
+                idx = _flat_index(t, c, z, size_c=ome_scene.size_c, size_z=ome_scene.size_z)
+                the_t[idx] = t
+                the_c[idx] = c
+                the_z[idx] = z
 
-    table = read_table(ds, scene_id, table_name)
-    if order is None:
-        order_col = f"the_{axis}"
-        if order_col in table:
-            order_values = np.asarray(table[order_col], dtype=np.float64)
-        elif axis in {"x", "y"}:
-            order_values = np.zeros(len(next(iter(table.values()))), dtype=np.float64)
-        else:
-            raise ValueError(f"No default ordering column available for axis {axis!r}")
-    else:
-        order_values = np.asarray(order, dtype=np.float64)
+    for plane in ome_scene.planes:
+        t = _safe_int(plane.get("TheT"))
+        c = _safe_int(plane.get("TheC"))
+        z = _safe_int(plane.get("TheZ"))
+        if t is None or c is None or z is None:
+            continue
+        if not (0 <= t < ome_scene.size_t and 0 <= c < ome_scene.size_c and 0 <= z < ome_scene.size_z):
+            warnings.append(
+                ValidationMessage(
+                    level="warning",
+                    code="plane_index_out_of_bounds",
+                    message=f"Scene {scene_id} has out-of-bounds plane metadata at (t={t}, c={c}, z={z}).",
+                )
+            )
+            continue
+        idx = _flat_index(t, c, z, size_c=ome_scene.size_c, size_z=ome_scene.size_z)
+        if plane_rows[idx] is not None:
+            raise ValueError(f"Duplicate plane metadata for scene {scene_id} at (t={t}, c={c}, z={z})")
+        plane_rows[idx] = plane
+        positioners_t[idx] = _safe_float(plane.get("DeltaT"))
+        positioners_z[idx] = _safe_float(plane.get("PositionZ"))
+        positioners_y[idx] = _safe_float(plane.get("PositionY"))
+        positioners_x[idx] = _safe_float(plane.get("PositionX"))
 
-    if spacing is None:
-        scene_md = ds.read_scene_metadata(scene_id)
-        spacing = float(scene_md.get("microio", {}).get("axis_resolution", {}).get(axis, {}).get("value", 1.0))
-        logger.debug("Resolved spacing for axis %s in scene %s from metadata: %s", axis, scene_id, spacing)
+    data = {
+        "the_t": the_t,
+        "the_c": the_c,
+        "the_z": the_z,
+        "positioners_t": positioners_t,
+        "positioners_z": positioners_z,
+        "positioners_y": positioners_y,
+        "positioners_x": positioners_x,
+    }
+    report = PlaneTableReport(
+        scene_id=scene_id,
+        table_name=table_name,
+        row_count=row_count,
+        persisted=False,
+        warnings=warnings,
+    )
+    if persist:
+        _require_writable(ds)
+        _persist_table(ds, scene_id, table_name, data, ome_scene, warnings)
+        report.persisted = True
+    return data, report
 
-    return origin + (order_values * float(spacing))
+
+def ensure_plane_table(ds, scene_id: str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, rebuild: bool = False):
+    scene = ds.root[scene_id]
+    if not rebuild and "tables" in scene and table_name in scene["tables"]:
+        metadata = scene["tables"][table_name].attrs.asdict()
+        if metadata.get("schema_version") == MICROIO_TABLE_SCHEMA_VERSION:
+            table = load_plane_table(ds, scene_id, table_name=table_name)
+            return table, PlaneTableReport(
+                scene_id=scene_id,
+                table_name=table_name,
+                row_count=len(next(iter(table.values()))) if table else 0,
+                persisted=False,
+            )
+    return build_plane_table(ds, scene_id, table_name=table_name, persist=True)
+
+
+def _persist_table(ds, scene_id: str, table_name: str, data: dict[str, np.ndarray], ome_scene, warnings: list[ValidationMessage]) -> None:
+    scene = ds.root[scene_id]
+    tables = scene.require_group("tables")
+    if table_name in tables:
+        del tables[table_name]
+    table = tables.create_group(table_name)
+    for name, arr in data.items():
+        _write_array(table, name, arr)
+
+    table.attrs["schema"] = "microio.axes_trajectory"
+    table.attrs["schema_version"] = MICROIO_TABLE_SCHEMA_VERSION
+    table.attrs["row_axis_order"] = ["t", "c", "z"]
+    table.attrs["shape_tcz"] = [ome_scene.size_t, ome_scene.size_c, ome_scene.size_z]
+    table.attrs["validation"] = [message.__dict__ for message in warnings]
+    table.attrs["axis_metadata"] = {
+        "t": _axis_metadata("DeltaT", ome_scene.planes, "DeltaTUnit"),
+        "z": _axis_metadata("PositionZ", ome_scene.planes, "PositionZUnit"),
+        "y": _axis_metadata("PositionY", ome_scene.planes, "PositionYUnit"),
+        "x": _axis_metadata("PositionX", ome_scene.planes, "PositionXUnit"),
+    }
+
+
+def _axis_metadata(value_key: str, planes: list[dict[str, str | None]], unit_key: str) -> dict[str, object]:
+    units = {plane.get(unit_key) for plane in planes if plane.get(unit_key)}
+    if len(units) > 1:
+        raise ValueError(f"Mixed units for {value_key}: {sorted(units)}")
+    raw_unit = next(iter(units), None)
+    unit, warning_code = normalize_unit(raw_unit)
+    missing_count = sum(1 for plane in planes if plane.get(value_key) is None)
+    return {
+        "unit": unit,
+        "raw_unit": raw_unit,
+        "warning_code": warning_code,
+        "missing_count": missing_count,
+    }
+
+
+def _write_array(group, name: str, values: np.ndarray) -> None:
+    try:
+        group.create_array(name, data=values, chunks=(min(len(values), 8192),))
+    except AttributeError:
+        group.create_dataset(name, data=values, chunks=(min(len(values), 8192),))
+
+
+def _flat_index(t: int, c: int, z: int, *, size_c: int, size_z: int) -> int:
+    return (t * size_c * size_z) + (c * size_z) + z
+
+
+def _safe_int(raw: str | None) -> int | None:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _safe_float(raw: str | None) -> float:
+    if raw is None:
+        return math.nan
+    try:
+        return float(raw)
+    except Exception:
+        return math.nan
+
+
+def _require_writable(ds) -> None:
+    if ds.mode == "r":
+        raise PermissionError("Dataset was opened read-only; reopen with mode='a' to persist tables.")

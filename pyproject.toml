@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "microio"
-version = "0.1.0"
-description = "Microscopy IO library for VSI/LIF to OME-Zarr and OME-Zarr reading"
+version = "0.2.0"
+description = "Reader-first microscopy IO library for bioformats2raw OME-Zarr inspection and enrichment"
 requires-python = ">=3.10"
 dependencies = [
   "numpy",
@@ -17,10 +17,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-writer = [
-  "bioio-bioformats",
-  "scyjava",
-]
 dev = [
   "pytest",
 ]

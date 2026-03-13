@@ -1,10 +1,15 @@
-﻿from pathlib import Path
-import json
+from pathlib import Path
 
 
 def test_reference_scene_metadata_is_large_but_readable():
-    path = Path("data_in/zarr/LMNB1 RFP 60xOHR stack TL 50_tZ-Stack_20251113_1706.zarr/c555/zarr.json")
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "data_in"
+        / "zarr"
+        / "lif_test.zarr"
+        / "OME"
+        / "METADATA.ome.xml"
+    )
     txt = path.read_text(encoding="utf-8")
-    data = json.loads(txt)
-    assert "attributes" in data
+    assert "<OME" in txt
     assert len(txt) > 100000

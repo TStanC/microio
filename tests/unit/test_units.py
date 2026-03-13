@@ -12,6 +12,12 @@ def test_normalize_corrupted():
     assert warn == "unit_corrupted_coerced"
 
 
+def test_normalize_corrupted_millisecond():
+    norm, warn = normalize_unit("10^-3s^1")
+    assert norm == "millisecond"
+    assert warn == "unit_corrupted_coerced"
+
+
 def test_normalize_unknown():
     norm, warn = normalize_unit("nonsense_unit")
     assert norm == "unknown"

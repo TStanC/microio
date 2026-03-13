@@ -1,8 +1,16 @@
 # microio library
-## Convert to and read OME-ZARR Microscopy files
+## Inspect and enrich bioformats2raw OME-Zarr microscopy data
 
-March 10, 2026: Created library, added core features to convert .lif and .vsi, read back image data and metadata
+`microio` is now a reader-first library for already-converted OME-Zarr datasets.
 
+Current scope:
+- open bioformats2raw-style OME-Zarr datasets
+- parse scene metadata from Zarr attrs and `OME/METADATA.ome.xml`
+- validate multiscale axis metadata
+- build per-plane coordinate tables
+- safely repair placeholder `z` metadata when stronger XML evidence exists
 
-*Disclaimer: Created with the help of OpenAI's Codex*
-
+Out of scope:
+- proprietary LIF/VSI conversion
+- automatic `x/y` repair
+- automatic scalar `t` repair from ambiguous timing metadata
