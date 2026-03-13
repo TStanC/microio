@@ -157,6 +157,8 @@ def write_axes_trajectory_table(
 def _build_plane_rows(scene: SceneXmlMeta, *, size_t: int, size_c: int, size_z: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, str | None] | None]]:
     """Index raw OME planes into one row per logical ``(t, c, z)`` plane."""
     row_count = max(1, size_t * size_c * size_z)
+    # These per-plane vectors are metadata-sized, so eager NumPy storage is
+    # intentional and avoids needless Dask overhead.
     the_t = np.zeros(row_count, dtype=np.int32)
     the_c = np.zeros(row_count, dtype=np.int32)
     the_z = np.zeros(row_count, dtype=np.int32)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import warnings
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,19 @@ class SceneAccessor:
         return self.dataset.level_ref(self.ref.id, level)
 
     def array(self, level: int | str = 0, *, as_array: bool = False):
+        if as_array:
+            warnings.warn(
+                "SceneAccessor.array(..., as_array=True) is deprecated; use numpy_array(...) instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return self.dataset.read_level(self.ref.id, level, as_array=as_array)
+
+    def zarr_array(self, level: int | str = 0):
+        return self.dataset.read_level_zarr(self.ref.id, level)
+
+    def numpy_array(self, level: int | str = 0):
+        return self.dataset.read_level_numpy(self.ref.id, level)
 
 
 @dataclass
@@ -247,6 +260,16 @@ class DatasetHandle:
 
         return read_level(self, scene, level, as_array=as_array)
 
+    def read_level_zarr(self, scene: int | str, level: int | str = 0):
+        from microio.reader.metadata import read_level_zarr
+
+        return read_level_zarr(self, scene, level)
+
+    def read_level_numpy(self, scene: int | str, level: int | str = 0):
+        from microio.reader.metadata import read_level_numpy
+
+        return read_level_numpy(self, scene, level)
+
     def validate_scene_data_flow(self, scene: int | str) -> DataFlowReport:
         from microio.reader.metadata import validate_scene_data_flow
 
@@ -301,3 +324,6 @@ class DatasetHandle:
 
     def read_scene_array(self, scene_id: str, level: str = "0"):
         return self.read_level(scene_id, level)
+
+    def read_scene_array_zarr(self, scene_id: str, level: str = "0"):
+        return self.read_level_zarr(scene_id, level)

@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import uuid
 
+import dask.array as da
 import numpy as np
 import pytest
 import zarr
@@ -54,10 +55,31 @@ def test_level_access_by_index_and_path(vsi_subset):
 
     arr0 = ds.read_level("0", 0)
     arr1 = ds.read_level("0", "1")
+    raw = ds.read_level_zarr("0", 1)
+    eager = ds.read_level_numpy("0", 1)
+    compat = ds.read_scene_array("0", "0")
+    raw_compat = ds.read_scene_array_zarr("0", "0")
+
+    assert isinstance(arr0, da.Array)
+    assert isinstance(arr1, da.Array)
+    assert isinstance(compat, da.Array)
+    assert isinstance(raw, zarr.Array)
+    assert isinstance(raw_compat, zarr.Array)
+    assert isinstance(eager, np.ndarray)
     assert arr0.shape == levels[0].shape
     assert arr1.shape == levels[1].shape
-    assert ds.read_level("0", 1, as_array=True).shape == levels[1].shape
-    assert ds.read_scene_array("0", "0").shape == levels[0].shape
+    assert eager.shape == levels[1].shape
+    assert compat.shape == levels[0].shape
+    assert raw.shape == levels[1].shape
+    assert arr1[(slice(0, 1), slice(None), slice(0, 2), slice(0, 3), slice(0, 4))].compute().shape == (
+        1,
+        1,
+        2,
+        3,
+        4,
+    )
+    with pytest.deprecated_call():
+        assert ds.read_level("0", 1, as_array=True).shape == levels[1].shape
 
 
 def test_scene_accessor_and_data_flow_validation(vsi_subset):
@@ -68,6 +90,9 @@ def test_scene_accessor_and_data_flow_validation(vsi_subset):
 
     assert scene.ref.id == "0"
     assert scene.level(0).path == "0"
+    assert isinstance(scene.array(0), da.Array)
+    assert isinstance(scene.zarr_array(0), zarr.Array)
+    assert isinstance(scene.numpy_array(0), np.ndarray)
     assert scene.array(0).shape == (100, 1, 34, 2818, 2824)
     assert report.errors == []
     assert report.warnings == []

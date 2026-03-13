@@ -5,7 +5,9 @@ from __future__ import annotations
 from functools import lru_cache
 import logging
 from pathlib import Path
+import warnings
 
+import dask.array as da
 from microio.common.models import DataFlowReport, LevelRef, SceneRef, ValidationMessage
 from microio.reader.ome_xml import OmeDocument, parse_ome_xml
 
@@ -200,12 +202,24 @@ def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
 
 
 def read_level(ds, scene: int | str, level: int | str = 0, *, as_array: bool = False):
+    if as_array:
+        warnings.warn(
+            "read_level(..., as_array=True) is deprecated; use read_level_numpy(...) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return read_level_numpy(ds, scene, level)
+    return _wrap_zarr_as_dask(read_level_zarr(ds, scene, level))
+
+
+def read_level_zarr(ds, scene: int | str, level: int | str = 0):
     ref = scene_ref(ds, scene)
     level_info = level_ref(ds, ref.id, level)
-    array = ds.root[ref.id][level_info.path]
-    if as_array:
-        return array[:]
-    return array
+    return ds.root[ref.id][level_info.path]
+
+
+def read_level_numpy(ds, scene: int | str, level: int | str = 0):
+    return read_level_zarr(ds, scene, level)[:]
 
 
 def read_ome_xml(ds) -> str:
@@ -387,6 +401,13 @@ def _validate_pyramid_shapes(
             raise ValueError(
                 f"Scene {scene_id} level {level_path!r} axis {axis_name} grows from {previous_dim} to {current_dim}"
             )
+
+
+def _wrap_zarr_as_dask(array):
+    chunks = getattr(array, "chunks", None)
+    if chunks is not None:
+        return da.from_array(array, chunks=chunks, inline_array=True)
+    return da.from_array(array, inline_array=True)
 
 
 def _ome_xml_path(dataset_path: Path) -> Path:

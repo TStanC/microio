@@ -184,12 +184,24 @@ def _sample_channel_windows(data) -> list[tuple[float, float]]:
 
 
 def _sample_data(data, target_values: int = 262144):
-    """Subsample ``TCZYX`` data before computing display statistics."""
+    """Subsample ``TCZYX`` data before computing display statistics.
+
+    This is one of the few intentional eager materialization sites in the
+    library. It is bounded by the strided sample size so OMERO window
+    estimation does not compute the full scene into memory.
+    """
     t, c, z, y, x = (int(v) for v in data.shape)
     total_values = max(1, t * c * z * y * x)
     stride = max(1, int(math.ceil((total_values / target_values) ** 0.25)))
     logger.debug("Sampling data for OMERO windows with stride=%d target_values=%d", stride, target_values)
     sampled = data[::stride, :, ::stride, ::stride, ::stride]
+    return _materialize_sample(sampled)
+
+
+def _materialize_sample(sampled):
+    """Compute a bounded sample into NumPy for metadata-only statistics."""
+    sample_values = getattr(sampled, "size", None)
+    logger.debug("Materializing bounded sample for OMERO windows with size=%s", sample_values)
     return np.asarray(sampled.compute() if hasattr(sampled, "compute") else sampled)
 
 

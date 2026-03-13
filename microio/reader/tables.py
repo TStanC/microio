@@ -48,6 +48,8 @@ def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECT
             )
         )
 
+    # Table vectors scale with plane count, not with image volume, so NumPy is
+    # still the appropriate representation here.
     the_t = np.zeros(row_count, dtype=np.int32)
     the_c = np.zeros(row_count, dtype=np.int32)
     the_z = np.zeros(row_count, dtype=np.int32)
