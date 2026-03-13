@@ -14,3 +14,5 @@ Out of scope:
 - proprietary LIF/VSI conversion
 - automatic `x/y` repair
 - automatic scalar `t` repair from ambiguous timing metadata
+
+*Disclaimer: OpenAI's codex extension was heavily used to program this library*
