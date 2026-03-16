@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields, is_dataclass
 import json
+from types import MappingProxyType
 
 from microio import open_dataset
 from microio.common.logging_utils import setup_logging
@@ -15,31 +17,31 @@ def _cmd_inspect(args) -> int:
     payload = {
         "path": str(ds.path),
         "root": ds.read_root_metadata(),
-        "scene_refs": [scene.__dict__ for scene in ds.list_scene_refs()],
+        "scene_refs": [_json_ready(scene) for scene in ds.list_scene_refs()],
         "scenes": {},
     }
     for ref in ds.list_scene_refs():
         report = ds.validate_scene_data_flow(ref.id)
         try:
-            levels = [level.__dict__ for level in ds.list_levels(ref.id)]
+            levels = [_json_ready(level) for level in ds.list_levels(ref.id)]
         except Exception as exc:
             levels = []
             level_error = {"code": "multiscale_invalid", "message": str(exc)}
         else:
             level_error = None
         scene_payload = {
-            "ref": ref.__dict__,
+            "ref": _json_ready(ref),
             "metadata": ds.read_scene_metadata(ref.id),
             "levels": levels,
             "data_flow": {
-                "warnings": [message.__dict__ for message in report.warnings],
-                "errors": [message.__dict__ for message in report.errors],
+                "warnings": [_json_ready(message) for message in report.warnings],
+                "errors": [_json_ready(message) for message in report.errors],
             },
         }
         if level_error is not None:
             scene_payload["level_error"] = level_error
         try:
-            scene_payload["ome"] = ds.read_scene_ome_metadata(ref.id).__dict__
+            scene_payload["ome"] = _json_ready(ds.read_scene_ome_metadata(ref.id))
         except FileNotFoundError:
             scene_payload["ome"] = None
         payload["scenes"][ref.id] = scene_payload
@@ -62,17 +64,29 @@ def _cmd_repair(args) -> int:
             "table": {
                 "row_count": table_report.row_count,
                 "persisted": table_report.persisted,
-                "warnings": [message.__dict__ for message in table_report.warnings],
+                "warnings": [_json_ready(message) for message in table_report.warnings],
             },
             "repair": {
                 "persisted": repair_report.persisted,
-                "axis_states": {axis: state.__dict__ for axis, state in repair_report.axis_states.items()},
-                "warnings": [message.__dict__ for message in repair_report.warnings],
-                "errors": [message.__dict__ for message in repair_report.errors],
+                "axis_states": {axis: _json_ready(state) for axis, state in repair_report.axis_states.items()},
+                "warnings": [_json_ready(message) for message in repair_report.warnings],
+                "errors": [_json_ready(message) for message in repair_report.errors],
             },
         }
     print(json.dumps(payload, indent=2, default=str))
     return 0
+
+
+def _json_ready(value):
+    if is_dataclass(value):
+        return {field.name: _json_ready(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, MappingProxyType):
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, dict):
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
 
 
 def main() -> int:

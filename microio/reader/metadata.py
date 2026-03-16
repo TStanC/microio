@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from copy import deepcopy
 import logging
 from pathlib import Path
-import warnings
 
 import dask.array as da
+from microio.common.constants import AXES_ORDER
 from microio.common.models import DataFlowReport, LevelRef, SceneRef, ValidationMessage
 from microio.reader.ome_xml import OmeDocument, parse_ome_xml
 
 
 logger = logging.getLogger("microio.reader.metadata")
 
-EXPECTED_AXES = ("t", "c", "z", "y", "x")
-
-
 def list_scene_refs(ds) -> list[SceneRef]:
+    cached = ds._scene_refs_cache
+    if cached is not None:
+        return cached
+
     scene_ids = _ordered_scene_ids(ds)
     scenes: list[SceneRef] = []
     names: list[str] = []
@@ -38,7 +39,7 @@ def list_scene_refs(ds) -> list[SceneRef]:
     for name in names:
         counts[name] = counts.get(name, 0) + 1
 
-    return [
+    resolved = [
         SceneRef(
             id=scene.id,
             index=scene.index,
@@ -49,6 +50,8 @@ def list_scene_refs(ds) -> list[SceneRef]:
         )
         for scene in scenes
     ]
+    ds._scene_refs_cache = resolved
+    return resolved
 
 
 def list_scenes(ds) -> list[str]:
@@ -122,15 +125,16 @@ def root_metadata(ds) -> dict:
 
 def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
     ref = scene_ref(ds, scene)
-    attrs = ds.root[ref.id].attrs.asdict()
-    if corrected:
-        return attrs
-    return attrs
+    attrs = _raw_scene_metadata(ds, ref.id)
+    if not corrected:
+        return deepcopy(attrs)
+    logger.info("Applying repaired axes overlay to scene %s metadata", ref.id)
+    return _apply_repaired_axes_overlay(attrs)
 
 
-def multiscale_metadata(ds, scene: int | str) -> dict:
+def multiscale_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
     ref = scene_ref(ds, scene)
-    attrs = ds.root[ref.id].attrs.asdict()
+    attrs = scene_metadata(ds, ref.id, corrected=corrected)
     multiscales = attrs.get("multiscales")
     if not isinstance(multiscales, list) or not multiscales:
         raise ValueError(f"Scene {ref.id} has no multiscales metadata")
@@ -141,6 +145,10 @@ def multiscale_metadata(ds, scene: int | str) -> dict:
 
 def list_levels(ds, scene: int | str) -> list[LevelRef]:
     ref = scene_ref(ds, scene)
+    cached = ds._level_refs_cache.get(ref.id)
+    if cached is not None:
+        return cached
+
     scene_group = ds.root[ref.id]
     multiscale = multiscale_metadata(ds, ref.id)
     axes = tuple(axis["name"] for axis in multiscale["axes"])
@@ -183,6 +191,7 @@ def list_levels(ds, scene: int | str) -> list[LevelRef]:
                 axis_units=axis_units,
             )
         )
+    ds._level_refs_cache[ref.id] = levels
     return levels
 
 
@@ -201,14 +210,7 @@ def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
     raise KeyError(f"Scene {ref.id} has no level path {level_text!r}; available={[item.path for item in levels]}")
 
 
-def read_level(ds, scene: int | str, level: int | str = 0, *, as_array: bool = False):
-    if as_array:
-        warnings.warn(
-            "read_level(..., as_array=True) is deprecated; use read_level_numpy(...) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return read_level_numpy(ds, scene, level)
+def read_level(ds, scene: int | str, level: int | str = 0):
     return _wrap_zarr_as_dask(read_level_zarr(ds, scene, level))
 
 
@@ -231,7 +233,7 @@ def read_ome_xml(ds) -> str:
 
 def scene_ome_metadata(ds, scene: int | str):
     ref = scene_ref(ds, scene)
-    document = read_ome_document(ds.path)
+    document = read_ome_document(ds)
     if ref.ome_index is not None and 0 <= ref.ome_index < len(document.scenes):
         candidate = document.scenes[ref.ome_index]
         if ref.name and candidate.name != ref.name and ref.duplicate_name_count == 1:
@@ -250,7 +252,7 @@ def scene_ome_metadata(ds, scene: int | str):
 
 
 def original_metadata(ds) -> dict[str, str]:
-    return read_ome_document(ds.path).original_metadata
+    return dict(read_ome_document(ds).original_metadata)
 
 
 def validate_scene_data_flow(ds, scene: int | str) -> DataFlowReport:
@@ -320,10 +322,11 @@ def validate_scene_data_flow(ds, scene: int | str) -> DataFlowReport:
     return DataFlowReport(scene=ref, levels=levels, warnings=warnings, errors=errors)
 
 
-@lru_cache(maxsize=16)
-def read_ome_document(dataset_path: Path) -> OmeDocument:
-    logger.debug("Parsing OME-XML for %s", dataset_path)
-    return parse_ome_xml(_ome_xml_path(dataset_path).read_text(encoding="utf-8", errors="replace"))
+def read_ome_document(ds) -> OmeDocument:
+    if ds._ome_document_cache is None:
+        logger.debug("Parsing OME-XML for %s", ds.path)
+        ds._ome_document_cache = parse_ome_xml(_ome_xml_path(ds.path).read_text(encoding="utf-8", errors="replace"))
+    return ds._ome_document_cache
 
 
 def _ordered_scene_ids(ds) -> list[str]:
@@ -348,7 +351,7 @@ def _scene_name(ds, scene_id: str) -> str:
 
 def _resolve_ome_index(ds, scene_id: str, *, dataset_index: int, scene_name: str) -> int | None:
     try:
-        document = read_ome_document(ds.path)
+        document = read_ome_document(ds)
     except FileNotFoundError:
         return None
 
@@ -379,8 +382,8 @@ def _validate_multiscale_axes(scene_id: str, multiscale: dict) -> None:
         raise ValueError(f"Scene {scene_id} has unnamed multiscale axes")
     if len(set(axis_names)) != len(axis_names):
         raise ValueError(f"Scene {scene_id} has duplicate multiscale axes: {axis_names}")
-    if tuple(axis_names) != EXPECTED_AXES:
-        raise ValueError(f"Scene {scene_id} uses unsupported axis order {axis_names}; expected {list(EXPECTED_AXES)}")
+    if tuple(axis_names) != AXES_ORDER:
+        raise ValueError(f"Scene {scene_id} uses unsupported axis order {axis_names}; expected {list(AXES_ORDER)}")
 
 
 def _validate_pyramid_shapes(
@@ -393,11 +396,7 @@ def _validate_pyramid_shapes(
     for axis_name, previous_dim, current_dim in zip(axes, previous_shape, current_shape):
         if current_dim <= 0:
             raise ValueError(f"Scene {scene_id} level {level_path!r} axis {axis_name} has invalid size {current_dim}")
-        if axis_name in {"y", "x"} and current_dim > previous_dim:
-            raise ValueError(
-                f"Scene {scene_id} level {level_path!r} axis {axis_name} grows from {previous_dim} to {current_dim}"
-            )
-        if axis_name in {"t", "c", "z"} and current_dim > previous_dim:
+        if current_dim > previous_dim:
             raise ValueError(
                 f"Scene {scene_id} level {level_path!r} axis {axis_name} grows from {previous_dim} to {current_dim}"
             )
@@ -412,6 +411,50 @@ def _wrap_zarr_as_dask(array):
 
 def _ome_xml_path(dataset_path: Path) -> Path:
     return Path(dataset_path) / "OME" / "METADATA.ome.xml"
+
+
+def _raw_scene_metadata(ds, scene_id: str) -> dict:
+    cached = ds._raw_scene_metadata_cache.get(scene_id)
+    if cached is None:
+        cached = ds.root[scene_id].attrs.asdict()
+        ds._raw_scene_metadata_cache[scene_id] = cached
+    return cached
+
+
+def _apply_repaired_axes_overlay(attrs: dict) -> dict:
+    repaired_axes = attrs.get("microio", {}).get("repair", {}).get("repaired_axes", {})
+    if not repaired_axes:
+        return deepcopy(attrs)
+
+    out = deepcopy(attrs)
+    multiscales = out.get("multiscales")
+    if not isinstance(multiscales, list) or not multiscales:
+        return out
+    multiscale = multiscales[0]
+    axes = multiscale.get("axes")
+    datasets = multiscale.get("datasets")
+    if not isinstance(axes, list) or not isinstance(datasets, list):
+        return out
+    axis_index = {axis.get("name"): idx for idx, axis in enumerate(axes)}
+    for axis_name, repair in repaired_axes.items():
+        idx = axis_index.get(axis_name)
+        if idx is None:
+            continue
+        unit = repair.get("unit")
+        value = repair.get("value")
+        if unit is not None:
+            axes[idx]["unit"] = unit
+        if value is None:
+            continue
+        for dataset in datasets:
+            transforms = dataset.get("coordinateTransformations")
+            if not isinstance(transforms, list) or not transforms:
+                continue
+            scale = transforms[0].get("scale")
+            if not isinstance(scale, list) or len(scale) != len(AXES_ORDER):
+                continue
+            scale[idx] = float(value)
+    return out
 
 
 def _natural_key(text: str):

@@ -41,5 +41,5 @@ Reader safety rules:
 - scene names may be duplicated in real datasets; ambiguous name lookup raises an error
 - high-level image reads are lazy and Dask-first by default
 - level access validates metadata paths, scale vectors, axis order, and array dimensionality before returning data
-
+*For more detailed documentation, please visit [DeepWiki](https://deepwiki.com/TStanC/microio) or look at the docstrings.*
 *Disclaimer: OpenAI's codex extension was heavily used to program this library*

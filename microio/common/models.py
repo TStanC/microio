@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-import warnings
 
 
 @dataclass(frozen=True)
@@ -85,7 +84,7 @@ class SceneOmeMetadata:
     physical_size_z_unit: str | None
     time_increment: float | None
     time_increment_unit: str | None
-    planes: list[dict[str, str | None]]
+    planes: tuple[dict[str, str | None], ...]
 
 
 @dataclass
@@ -142,14 +141,8 @@ class SceneAccessor:
     def level(self, level: int | str = 0) -> LevelRef:
         return self.dataset.level_ref(self.ref.id, level)
 
-    def array(self, level: int | str = 0, *, as_array: bool = False):
-        if as_array:
-            warnings.warn(
-                "SceneAccessor.array(..., as_array=True) is deprecated; use numpy_array(...) instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        return self.dataset.read_level(self.ref.id, level, as_array=as_array)
+    def array(self, level: int | str = 0):
+        return self.dataset.read_level(self.ref.id, level)
 
     def zarr_array(self, level: int | str = 0):
         return self.dataset.read_level_zarr(self.ref.id, level)
@@ -165,6 +158,19 @@ class DatasetHandle:
     path: Path
     root: Any
     mode: str = "r"
+    _scene_refs_cache: list[SceneRef] | None = field(default=None, init=False, repr=False)
+    _level_refs_cache: dict[str, list[LevelRef]] = field(default_factory=dict, init=False, repr=False)
+    _raw_scene_metadata_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _ome_document_cache: Any | None = field(default=None, init=False, repr=False)
+
+    def invalidate_caches(self, scene_id: str | None = None) -> None:
+        self._scene_refs_cache = None
+        if scene_id is None:
+            self._level_refs_cache.clear()
+            self._raw_scene_metadata_cache.clear()
+        else:
+            self._level_refs_cache.pop(str(scene_id), None)
+            self._raw_scene_metadata_cache.pop(str(scene_id), None)
 
     def list_scene_refs(self) -> list[SceneRef]:
         from microio.reader.metadata import list_scene_refs
@@ -255,10 +261,10 @@ class DatasetHandle:
 
         return level_ref(self, scene, level)
 
-    def read_level(self, scene: int | str, level: int | str = 0, *, as_array: bool = False):
+    def read_level(self, scene: int | str, level: int | str = 0):
         from microio.reader.metadata import read_level
 
-        return read_level(self, scene, level, as_array=as_array)
+        return read_level(self, scene, level)
 
     def read_level_zarr(self, scene: int | str, level: int | str = 0):
         from microio.reader.metadata import read_level_zarr
@@ -321,9 +327,3 @@ class DatasetHandle:
         from microio.reader.extras import read_microio_extras
 
         return read_microio_extras(self, scene)
-
-    def read_scene_array(self, scene_id: str, level: str = "0"):
-        return self.read_level(scene_id, level)
-
-    def read_scene_array_zarr(self, scene_id: str, level: str = "0"):
-        return self.read_level_zarr(scene_id, level)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import logging
 import math
 
 import numpy as np
 
 from microio.common.constants import AXES_TRAJECTORY_TABLE_NAME, MICROIO_TABLE_SCHEMA_VERSION
+from microio.common.mutations import require_writable
 from microio.common.models import PlaneTableReport, ValidationMessage
 from microio.common.units import normalize_unit
 from microio.reader.metadata import scene_ome_metadata
@@ -108,8 +108,9 @@ def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECT
         warnings=warnings,
     )
     if persist:
-        _require_writable(ds)
+        require_writable(ds)
         _persist_table(ds, ref.id, table_name, data, ome_scene, warnings)
+        ds.invalidate_caches(scene_id=ref.id)
         report.persisted = True
     return data, report
 
@@ -194,8 +195,3 @@ def _safe_float(raw: str | None) -> float:
         return float(raw)
     except Exception:
         return math.nan
-
-
-def _require_writable(ds) -> None:
-    if ds.mode == "r":
-        raise PermissionError("Dataset was opened read-only; reopen with mode='a' to persist tables.")

@@ -57,19 +57,14 @@ def test_level_access_by_index_and_path(vsi_subset):
     arr1 = ds.read_level("0", "1")
     raw = ds.read_level_zarr("0", 1)
     eager = ds.read_level_numpy("0", 1)
-    compat = ds.read_scene_array("0", "0")
-    raw_compat = ds.read_scene_array_zarr("0", "0")
 
     assert isinstance(arr0, da.Array)
     assert isinstance(arr1, da.Array)
-    assert isinstance(compat, da.Array)
     assert isinstance(raw, zarr.Array)
-    assert isinstance(raw_compat, zarr.Array)
     assert isinstance(eager, np.ndarray)
     assert arr0.shape == levels[0].shape
     assert arr1.shape == levels[1].shape
     assert eager.shape == levels[1].shape
-    assert compat.shape == levels[0].shape
     assert raw.shape == levels[1].shape
     assert arr1[(slice(0, 1), slice(None), slice(0, 2), slice(0, 3), slice(0, 4))].compute().shape == (
         1,
@@ -78,8 +73,6 @@ def test_level_access_by_index_and_path(vsi_subset):
         3,
         4,
     )
-    with pytest.deprecated_call():
-        assert ds.read_level("0", 1, as_array=True).shape == levels[1].shape
 
 
 def test_scene_accessor_and_data_flow_validation(vsi_subset):
@@ -96,6 +89,21 @@ def test_scene_accessor_and_data_flow_validation(vsi_subset):
     assert scene.array(0).shape == (100, 1, 34, 2818, 2824)
     assert report.errors == []
     assert report.warnings == []
+
+
+def test_scene_metadata_cache_is_invalidated_after_persisted_repair(vsi_subset):
+    ds = open_dataset(vsi_subset, mode="a")
+
+    before = ds.read_scene_metadata("0", corrected=False)
+    repair = ds.repair_axis_metadata("0", persist=True)
+    after_raw = ds.read_scene_metadata("0", corrected=False)
+    after_corrected = ds.read_scene_metadata("0", corrected=True)
+
+    assert repair.persisted is True
+    assert before.get("microio") is None
+    assert after_raw["microio"]["repair"]["repaired_axes"]["z"]["value"] == 0.75
+    assert after_raw["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 0.75
+    assert after_corrected["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 0.75
 
 
 def test_scene_index_maps_to_original_ome_index_in_subset(lif_subset):

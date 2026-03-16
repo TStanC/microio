@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 import xml.etree.ElementTree as ET
 
 from microio.common.models import SceneOmeMetadata
@@ -17,9 +18,8 @@ class OmeDocument:
     """Parsed OME-XML document and lookup tables."""
 
     xml_text: str
-    root: ET.Element
-    scenes: list[SceneOmeMetadata]
-    original_metadata: dict[str, str]
+    scenes: tuple[SceneOmeMetadata, ...]
+    original_metadata: MappingProxyType[str, str]
 
 
 def parse_ome_xml(xml_text: str) -> OmeDocument:
@@ -33,19 +33,21 @@ def parse_ome_xml(xml_text: str) -> OmeDocument:
         planes = []
         for plane in px.findall("ome:Plane", NS):
             planes.append(
-                {
-                    "TheT": plane.get("TheT"),
-                    "TheC": plane.get("TheC"),
-                    "TheZ": plane.get("TheZ"),
-                    "DeltaT": plane.get("DeltaT"),
-                    "DeltaTUnit": plane.get("DeltaTUnit"),
-                    "PositionX": plane.get("PositionX"),
-                    "PositionXUnit": plane.get("PositionXUnit"),
-                    "PositionY": plane.get("PositionY"),
-                    "PositionYUnit": plane.get("PositionYUnit"),
-                    "PositionZ": plane.get("PositionZ"),
-                    "PositionZUnit": plane.get("PositionZUnit"),
-                }
+                MappingProxyType(
+                    {
+                        "TheT": plane.get("TheT"),
+                        "TheC": plane.get("TheC"),
+                        "TheZ": plane.get("TheZ"),
+                        "DeltaT": plane.get("DeltaT"),
+                        "DeltaTUnit": plane.get("DeltaTUnit"),
+                        "PositionX": plane.get("PositionX"),
+                        "PositionXUnit": plane.get("PositionXUnit"),
+                        "PositionY": plane.get("PositionY"),
+                        "PositionYUnit": plane.get("PositionYUnit"),
+                        "PositionZ": plane.get("PositionZ"),
+                        "PositionZUnit": plane.get("PositionZUnit"),
+                    }
+                )
             )
         scenes.append(
             SceneOmeMetadata(
@@ -64,7 +66,7 @@ def parse_ome_xml(xml_text: str) -> OmeDocument:
                 physical_size_z_unit=px.get("PhysicalSizeZUnit"),
                 time_increment=_maybe_float(px.get("TimeIncrement")),
                 time_increment_unit=px.get("TimeIncrementUnit"),
-                planes=planes,
+                planes=tuple(planes),
             )
         )
 
@@ -77,9 +79,8 @@ def parse_ome_xml(xml_text: str) -> OmeDocument:
 
     return OmeDocument(
         xml_text=xml_text,
-        root=root,
-        scenes=scenes,
-        original_metadata=original_metadata,
+        scenes=tuple(scenes),
+        original_metadata=MappingProxyType(original_metadata),
     )
 
 

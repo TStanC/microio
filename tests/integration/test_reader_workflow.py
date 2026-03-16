@@ -25,10 +25,15 @@ def test_vsi_repair_persists_z_only(vsi_subset):
     assert repair.axis_states["t"].placeholder is True
     assert repair.axis_states["t"].repaired is False
 
-    attrs = ds.read_scene_metadata("0")
-    z_axis = next(axis for axis in attrs["multiscales"][0]["axes"] if axis["name"] == "z")
+    corrected = ds.read_scene_metadata("0")
+    raw = ds.read_scene_metadata("0", corrected=False)
+    z_axis = next(axis for axis in corrected["multiscales"][0]["axes"] if axis["name"] == "z")
+    raw_z_axis = next(axis for axis in raw["multiscales"][0]["axes"] if axis["name"] == "z")
     assert z_axis["unit"] == "micrometer"
-    assert attrs["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 0.75
+    assert corrected["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 0.75
+    assert raw_z_axis["unit"] == "micrometer"
+    assert raw["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 0.75
+    assert raw["microio"]["repair"]["repaired_axes"]["z"]["value"] == 0.75
 
 
 def test_ensure_plane_table_is_idempotent(vsi_subset):

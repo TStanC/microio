@@ -8,8 +8,9 @@ import math
 import statistics
 
 from microio.common.constants import AXES_ORDER, MICROIO_SCHEMA_VERSION
+from microio.common.mutations import require_writable, write_scene_attrs
 from microio.common.models import AxisState, RepairReport, ValidationMessage
-from microio.common.units import normalize_unit, to_base_scale
+from microio.common.units import normalize_unit
 from microio.reader.metadata import multiscale_metadata, scene_metadata, scene_ome_metadata
 
 
@@ -20,7 +21,7 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
     """Validate one scene's multiscale axis metadata without mutating the store."""
     ref = ds.scene_ref(scene_id)
     scene_md = scene_metadata(ds, ref.id, corrected=False)
-    ms = multiscale_metadata(ds, ref.id)
+    ms = multiscale_metadata(ds, ref.id, corrected=False)
     warnings: list[ValidationMessage] = []
     errors: list[ValidationMessage] = []
     axis_states: dict[str, AxisState] = {}
@@ -124,9 +125,8 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
 
     persisted = False
     if persist and repaired_axes:
-        _require_writable(ds)
-        scene = ds.root[ref.id]
-        attrs = deepcopy(scene.attrs.asdict())
+        require_writable(ds)
+        attrs = deepcopy(scene_metadata(ds, ref.id, corrected=False))
         _apply_scene_axis_repairs(attrs, repaired_axes, ref.id)
         microio = dict(attrs.get("microio", {}))
         repair_block = dict(microio.get("repair", {}))
@@ -143,8 +143,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
         }
         microio["repair"] = repair_block
         attrs["microio"] = microio
-        scene.attrs.clear()
-        scene.attrs.update(attrs)
+        write_scene_attrs(ds, ref.id, attrs)
         persisted = True
 
     return RepairReport(
@@ -169,15 +168,17 @@ def _apply_scene_axis_repairs(attrs: dict, repaired_axes: dict[str, AxisState], 
         idx = axis_index[axis_name]
         axes[idx]["unit"] = state.unit
         for dataset in datasets:
-            scale = dataset["coordinateTransformations"][0]["scale"]
-            if len(scale) != len(AXES_ORDER):
+            transforms = dataset.get("coordinateTransformations")
+            if not isinstance(transforms, list) or not transforms:
+                raise ValueError(f"Scene {scene_id} level {dataset.get('path')} has malformed coordinate transformations")
+            scale = transforms[0].get("scale")
+            if not isinstance(scale, list) or len(scale) != len(AXES_ORDER):
                 raise ValueError(f"Scene {scene_id} has malformed scale vector at level {dataset.get('path')}")
             scale[idx] = float(state.value)
 
     multiscale["axes"] = axes
     multiscale["datasets"] = datasets
     attrs["multiscales"] = [multiscale]
-
 
 def _resolve_z_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[ValidationMessage]]:
     messages: list[ValidationMessage] = []
@@ -385,8 +386,3 @@ def _attach_existing_repair(scene_md: dict, axis_states: dict[str, AxisState]) -
             confidence=metadata.get("confidence", "high"),
             warning_code=metadata.get("warning_code"),
         )
-
-
-def _require_writable(ds) -> None:
-    if ds.mode == "r":
-        raise PermissionError("Dataset was opened read-only; reopen with mode='a' to persist repairs.")
