@@ -12,7 +12,7 @@ from microio.common.logging_utils import setup_logging
 
 
 def _cmd_inspect(args) -> int:
-    setup_logging(args.log_level)
+    logger = setup_logging(args.log_level)
     ds = open_dataset(args.input)
     payload = {
         "path": str(ds.path),
@@ -45,12 +45,12 @@ def _cmd_inspect(args) -> int:
         except FileNotFoundError:
             scene_payload["ome"] = None
         payload["scenes"][ref.id] = scene_payload
-    print(json.dumps(payload, indent=2, default=str))
+    logger.info("%s", json.dumps(payload, indent=2, default=str))
     return 0
 
 
 def _cmd_repair(args) -> int:
-    setup_logging(args.log_level)
+    logger = setup_logging(args.log_level)
     ds = open_dataset(args.input, mode="a" if args.persist or args.persist_table else "r")
     scene_ids = args.scene or ds.list_scenes()
     payload = {"path": str(ds.path), "scenes": {}}
@@ -73,7 +73,7 @@ def _cmd_repair(args) -> int:
                 "errors": [_json_ready(message) for message in repair_report.errors],
             },
         }
-    print(json.dumps(payload, indent=2, default=str))
+    logger.info("%s", json.dumps(payload, indent=2, default=str))
     return 0
 
 
