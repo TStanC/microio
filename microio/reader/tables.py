@@ -18,18 +18,23 @@ logger = logging.getLogger("microio.reader.tables")
 
 
 def load_plane_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict[str, np.ndarray]:
+    """Load one persisted plane table into eager NumPy column arrays."""
     ref = ds.scene_ref(scene_id)
+    logger.debug("Loading plane table %s for scene %s", table_name, ref.id)
     table = ds.root[ref.id]["tables"][table_name]
     return {key: arr[:] for key, arr in table.arrays()}
 
 
 def read_table_metadata(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict:
+    """Read attrs for one persisted table."""
     ref = ds.scene_ref(scene_id)
     return ds.root[ref.id]["tables"][table_name].attrs.asdict()
 
 
 def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, persist: bool = False):
+    """Build a per-plane trajectory table from OME-XML plane metadata."""
     ref = ds.scene_ref(scene_id)
+    logger.info("Building plane table %s for scene %s (persist=%s)", table_name, ref.id, persist)
     ome_scene = scene_ome_metadata(ds, ref.id)
     row_count = max(1, ome_scene.size_t * ome_scene.size_c * ome_scene.size_z)
     warnings: list[ValidationMessage] = []
@@ -112,15 +117,18 @@ def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECT
         _persist_table(ds, ref.id, table_name, data, ome_scene, warnings)
         ds.invalidate_caches(scene_id=ref.id)
         report.persisted = True
+        logger.info("Persisted plane table %s for scene %s with %d rows", table_name, ref.id, row_count)
     return data, report
 
 
 def ensure_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, rebuild: bool = False):
+    """Load a compatible persisted plane table or rebuild it when needed."""
     ref = ds.scene_ref(scene_id)
     scene = ds.root[ref.id]
     if not rebuild and "tables" in scene and table_name in scene["tables"]:
         metadata = scene["tables"][table_name].attrs.asdict()
         if metadata.get("schema_version") == MICROIO_TABLE_SCHEMA_VERSION:
+            logger.debug("Reusing existing plane table %s for scene %s", table_name, ref.id)
             table = load_plane_table(ds, ref.id, table_name=table_name)
             return table, PlaneTableReport(
                 scene_id=ref.id,
@@ -132,6 +140,7 @@ def ensure_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJEC
 
 
 def _persist_table(ds, scene_id: str, table_name: str, data: dict[str, np.ndarray], ome_scene, warnings: list[ValidationMessage]) -> None:
+    """Persist a normalized plane table into the scene ``tables`` group."""
     scene = ds.root[scene_id]
     tables = scene.require_group("tables")
     if table_name in tables:
@@ -154,6 +163,7 @@ def _persist_table(ds, scene_id: str, table_name: str, data: dict[str, np.ndarra
 
 
 def _axis_metadata(value_key: str, planes: list[dict[str, str | None]], unit_key: str) -> dict[str, object]:
+    """Summarize unit provenance and completeness for one positioner column."""
     units = {plane.get(unit_key) for plane in planes if plane.get(unit_key)}
     if len(units) > 1:
         raise ValueError(f"Mixed units for {value_key}: {sorted(units)}")

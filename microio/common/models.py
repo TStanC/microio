@@ -110,6 +110,41 @@ class RepairReport:
 
 
 @dataclass
+class TableWriteReport:
+    """Result of writing or appending one scene table."""
+
+    scene_id: str
+    table_name: str
+    row_count: int
+    column_names: list[str]
+    persisted: bool
+    appended: bool = False
+
+
+@dataclass
+class LabelWriteReport:
+    """Result of writing one label image."""
+
+    scene_id: str
+    label_name: str
+    level_path: str
+    shape: tuple[int, ...]
+    dtype: str
+    persisted: bool
+
+
+@dataclass
+class RoiWriteReport:
+    """Result of writing one ROI image group."""
+
+    scene_id: str
+    roi_name: str
+    level_path: str
+    shape: tuple[int, ...]
+    persisted: bool
+
+
+@dataclass
 class DataFlowReport:
     """Consistency report for scene identity, metadata, and array access."""
 
@@ -327,3 +362,81 @@ class DatasetHandle:
         from microio.reader.extras import read_microio_extras
 
         return read_microio_extras(self, scene)
+
+    def write_table(
+        self,
+        scene: int | str,
+        name: str,
+        data: Any,
+        *,
+        attrs: dict[str, Any] | None = None,
+        overwrite: bool = False,
+        append: bool = False,
+        chunk_length: int | None = None,
+    ) -> TableWriteReport:
+        from microio.writer.tables import write_table
+
+        return write_table(
+            self,
+            scene,
+            name,
+            data,
+            attrs=attrs,
+            overwrite=overwrite,
+            append=append,
+            chunk_length=chunk_length,
+        )
+
+    def write_label_image(
+        self,
+        scene: int | str,
+        name: str,
+        data: Any,
+        *,
+        source_level: int | str = 0,
+        chunks: tuple[int, ...] | None = None,
+        dtype: Any | None = None,
+        attrs: dict[str, Any] | None = None,
+        overwrite: bool = False,
+        threads: int | None = None,
+    ) -> LabelWriteReport:
+        from microio.writer.images import write_label_image
+
+        return write_label_image(
+            self,
+            scene,
+            name,
+            data,
+            source_level=source_level,
+            chunks=chunks,
+            dtype=dtype,
+            attrs=attrs,
+            overwrite=overwrite,
+            threads=threads,
+        )
+
+    def write_roi(
+        self,
+        scene: int | str,
+        name: str,
+        slices: dict[str, Any],
+        *,
+        source_level: int | str = 0,
+        chunks: tuple[int, ...] | None = None,
+        attrs: dict[str, Any] | None = None,
+        overwrite: bool = False,
+        threads: int | None = None,
+    ) -> RoiWriteReport:
+        from microio.writer.images import write_roi
+
+        return write_roi(
+            self,
+            scene,
+            name,
+            slices,
+            source_level=source_level,
+            chunks=chunks,
+            attrs=attrs,
+            overwrite=overwrite,
+            threads=threads,
+        )

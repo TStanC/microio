@@ -12,11 +12,13 @@ Current scope:
 - validate multiscale axis metadata
 - build per-plane coordinate tables
 - safely repair placeholder `z` metadata when stronger XML evidence exists
+- write scene-local tables, single-scale label images, and single-scale ROI cutouts programmatically
 
 Out of scope:
 - proprietary LIF/VSI conversion
 - automatic `x/y` repair
 - automatic scalar `t` repair from ambiguous timing metadata
+- CLI-driven authoring of new write-side enrichments
 
 Basic reader usage:
 
@@ -34,6 +36,24 @@ eager = ds.read_level_numpy(scene.id, 1)  # explicit NumPy materialization
 # Name lookup is allowed only when the name is unique.
 matches = ds.scene_name_matches("C555")
 ```
+
+Programmatic write-side enrichment:
+
+```python
+import numpy as np
+
+from microio import open_dataset
+
+ds = open_dataset("path/to/dataset.zarr", mode="a")
+ds.write_table("0", "measurements", {"label_id": [1, 2], "volume": [10.5, 12.0]})
+ds.write_label_image("0", "segmentation", np.zeros(ds.level_ref("0", 0).shape, dtype=np.uint16))
+ds.write_roi("0", "roi_1", {"t": (0, 2), "z": (0, 5), "y": (100, 300), "x": (200, 400)})
+```
+
+Notes:
+- pandas `DataFrame` input is supported for `write_table` when pandas is installed
+- write APIs are fail-safe by default and require `overwrite=True` to replace existing targets
+- the CLI remains limited to inspection and repair flows
 
 Reader safety rules:
 - scene `id` means the actual Zarr child key, for example `"15"`

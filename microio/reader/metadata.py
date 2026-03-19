@@ -15,10 +15,13 @@ from microio.reader.ome_xml import OmeDocument, parse_ome_xml
 logger = logging.getLogger("microio.reader.metadata")
 
 def list_scene_refs(ds) -> list[SceneRef]:
+    """Resolve all scenes in stable dataset order and cache the result."""
     cached = ds._scene_refs_cache
     if cached is not None:
+        logger.debug("Using cached scene refs for %s", ds.path)
         return cached
 
+    logger.debug("Resolving scene refs for %s", ds.path)
     scene_ids = _ordered_scene_ids(ds)
     scenes: list[SceneRef] = []
     names: list[str] = []
@@ -60,6 +63,7 @@ def list_scenes(ds) -> list[str]:
 
 
 def scene_ref(ds, scene: int | str) -> SceneRef:
+    """Resolve one scene reference by id, dataset index, or unique name."""
     refs = list_scene_refs(ds)
     if isinstance(scene, int):
         if 0 <= scene < len(refs):
@@ -83,6 +87,7 @@ def scene_ref(ds, scene: int | str) -> SceneRef:
 
 
 def classify_scene_reference(ds, value: int | str) -> str:
+    """Classify a candidate scene reference without raising on misses."""
     if isinstance(value, int):
         return "index" if is_scene_index(ds, value) else "unknown"
 
@@ -98,32 +103,39 @@ def classify_scene_reference(ds, value: int | str) -> str:
 
 
 def is_scene_id(ds, value: str) -> bool:
+    """Return whether ``value`` matches a canonical scene id."""
     value_text = str(value)
     return any(ref.id == value_text for ref in list_scene_refs(ds))
 
 
 def is_scene_index(ds, value: int) -> bool:
+    """Return whether ``value`` is a valid dataset-order scene index."""
     return any(ref.index == int(value) for ref in list_scene_refs(ds))
 
 
 def scene_id_to_index(ds, scene_id: str) -> int:
+    """Convert a canonical scene id into its dataset-order index."""
     return scene_ref(ds, str(scene_id)).index
 
 
 def scene_index_to_id(ds, index: int) -> str:
+    """Convert a dataset-order scene index into its canonical id."""
     return scene_ref(ds, int(index)).id
 
 
 def scene_name_matches(ds, name: str) -> list[SceneRef]:
+    """Return all scenes whose display name equals ``name``."""
     name_text = str(name)
     return [ref for ref in list_scene_refs(ds) if ref.name == name_text]
 
 
 def root_metadata(ds) -> dict:
+    """Return root-group attributes as a plain dictionary."""
     return ds.root.attrs.asdict()
 
 
 def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
+    """Read one scene's attrs, optionally overlaying stored repairs."""
     ref = scene_ref(ds, scene)
     attrs = _raw_scene_metadata(ds, ref.id)
     if not corrected:
@@ -133,6 +145,7 @@ def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
 
 
 def multiscale_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
+    """Read and validate the primary multiscales block for one scene."""
     ref = scene_ref(ds, scene)
     attrs = scene_metadata(ds, ref.id, corrected=corrected)
     multiscales = attrs.get("multiscales")
@@ -144,11 +157,14 @@ def multiscale_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict
 
 
 def list_levels(ds, scene: int | str) -> list[LevelRef]:
+    """Enumerate and validate all multiscale levels for one scene."""
     ref = scene_ref(ds, scene)
     cached = ds._level_refs_cache.get(ref.id)
     if cached is not None:
+        logger.debug("Using cached level refs for scene %s", ref.id)
         return cached
 
+    logger.debug("Resolving level refs for scene %s", ref.id)
     scene_group = ds.root[ref.id]
     multiscale = multiscale_metadata(ds, ref.id)
     axes = tuple(axis["name"] for axis in multiscale["axes"])
@@ -196,6 +212,7 @@ def list_levels(ds, scene: int | str) -> list[LevelRef]:
 
 
 def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
+    """Resolve one level by index or path within a scene."""
     ref = scene_ref(ds, scene)
     levels = list_levels(ds, ref.id)
     if isinstance(level, int):
@@ -211,20 +228,24 @@ def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
 
 
 def read_level(ds, scene: int | str, level: int | str = 0):
+    """Read one image level as a Dask array."""
     return _wrap_zarr_as_dask(read_level_zarr(ds, scene, level))
 
 
 def read_level_zarr(ds, scene: int | str, level: int | str = 0):
+    """Read one image level as the underlying Zarr array."""
     ref = scene_ref(ds, scene)
     level_info = level_ref(ds, ref.id, level)
     return ds.root[ref.id][level_info.path]
 
 
 def read_level_numpy(ds, scene: int | str, level: int | str = 0):
+    """Materialize one image level eagerly as a NumPy array."""
     return read_level_zarr(ds, scene, level)[:]
 
 
 def read_ome_xml(ds) -> str:
+    """Read the dataset-level sidecar OME-XML text."""
     xml_path = _ome_xml_path(ds.path)
     if not xml_path.exists():
         raise FileNotFoundError(f"Missing OME sidecar XML: {xml_path}")
@@ -232,6 +253,7 @@ def read_ome_xml(ds) -> str:
 
 
 def scene_ome_metadata(ds, scene: int | str):
+    """Resolve normalized OME metadata for one scene."""
     ref = scene_ref(ds, scene)
     document = read_ome_document(ds)
     if ref.ome_index is not None and 0 <= ref.ome_index < len(document.scenes):
@@ -252,11 +274,14 @@ def scene_ome_metadata(ds, scene: int | str):
 
 
 def original_metadata(ds) -> dict[str, str]:
+    """Return the OME ``OriginalMetadata`` key-value block."""
     return dict(read_ome_document(ds).original_metadata)
 
 
 def validate_scene_data_flow(ds, scene: int | str) -> DataFlowReport:
+    """Validate scene identity, multiscale access, and OME/Zarr consistency."""
     ref = scene_ref(ds, scene)
+    logger.debug("Validating data flow for scene %s", ref.id)
     warnings: list[ValidationMessage] = []
     errors: list[ValidationMessage] = []
     try:
@@ -330,6 +355,7 @@ def read_ome_document(ds) -> OmeDocument:
 
 
 def _ordered_scene_ids(ds) -> list[str]:
+    """Return scene ids in stable dataset order, preferring OME series metadata."""
     ome_group = ds.root.get("OME")
     if ome_group is not None:
         attrs = ome_group.attrs.asdict()
@@ -342,6 +368,7 @@ def _ordered_scene_ids(ds) -> list[str]:
 
 
 def _scene_name(ds, scene_id: str) -> str:
+    """Extract the display name for one scene from multiscales metadata."""
     attrs = ds.root[scene_id].attrs.asdict()
     multiscales = attrs.get("multiscales")
     if isinstance(multiscales, list) and multiscales:
@@ -350,6 +377,7 @@ def _scene_name(ds, scene_id: str) -> str:
 
 
 def _resolve_ome_index(ds, scene_id: str, *, dataset_index: int, scene_name: str) -> int | None:
+    """Map a scene to an OME image index using the safest available evidence."""
     try:
         document = read_ome_document(ds)
     except FileNotFoundError:
@@ -370,6 +398,7 @@ def _resolve_ome_index(ds, scene_id: str, *, dataset_index: int, scene_name: str
 
 
 def _validate_multiscale_axes(scene_id: str, multiscale: dict) -> None:
+    """Validate axis metadata against the library's supported axis contract."""
     axes = multiscale.get("axes")
     datasets = multiscale.get("datasets")
     if not isinstance(axes, list) or not axes:
@@ -393,6 +422,7 @@ def _validate_pyramid_shapes(
     current_shape: tuple[int, ...],
     axes: tuple[str, ...],
 ) -> None:
+    """Ensure coarser pyramid levels do not grow relative to prior levels."""
     for axis_name, previous_dim, current_dim in zip(axes, previous_shape, current_shape):
         if current_dim <= 0:
             raise ValueError(f"Scene {scene_id} level {level_path!r} axis {axis_name} has invalid size {current_dim}")
@@ -403,6 +433,7 @@ def _validate_pyramid_shapes(
 
 
 def _wrap_zarr_as_dask(array):
+    """Wrap a Zarr-backed array as Dask while preserving existing chunking."""
     chunks = getattr(array, "chunks", None)
     if chunks is not None:
         return da.from_array(array, chunks=chunks, inline_array=True)
@@ -414,14 +445,17 @@ def _ome_xml_path(dataset_path: Path) -> Path:
 
 
 def _raw_scene_metadata(ds, scene_id: str) -> dict:
+    """Read and cache raw scene attrs without applying repair overlays."""
     cached = ds._raw_scene_metadata_cache.get(scene_id)
     if cached is None:
+        logger.debug("Caching raw scene metadata for scene %s", scene_id)
         cached = ds.root[scene_id].attrs.asdict()
         ds._raw_scene_metadata_cache[scene_id] = cached
     return cached
 
 
 def _apply_repaired_axes_overlay(attrs: dict) -> dict:
+    """Overlay persisted repair values onto a scene attrs dictionary."""
     repaired_axes = attrs.get("microio", {}).get("repair", {}).get("repaired_axes", {})
     if not repaired_axes:
         return deepcopy(attrs)

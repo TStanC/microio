@@ -85,6 +85,7 @@ def parse_ome_xml(xml_text: str) -> OmeDocument:
 
 
 def _maybe_float(raw: str | None) -> float | None:
+    """Parse a float-valued XML attribute, returning ``None`` on invalid input."""
     if raw is None:
         return None
     try:

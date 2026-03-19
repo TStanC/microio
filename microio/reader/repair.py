@@ -20,6 +20,7 @@ logger = logging.getLogger("microio.reader.repair")
 def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
     """Validate one scene's multiscale axis metadata without mutating the store."""
     ref = ds.scene_ref(scene_id)
+    logger.debug("Inspecting axis metadata for scene %s", ref.id)
     scene_md = scene_metadata(ds, ref.id, corrected=False)
     ms = multiscale_metadata(ds, ref.id, corrected=False)
     warnings: list[ValidationMessage] = []
@@ -89,8 +90,10 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
 def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> RepairReport:
     """Safely repair scene-level t/z metadata when stronger evidence exists."""
     ref = ds.scene_ref(scene_id)
+    logger.info("Repairing axis metadata for scene %s (persist=%s)", ref.id, persist)
     report = inspect_axis_metadata(ds, ref.id)
     if report.errors:
+        logger.info("Skipping repair for scene %s because validation reported %d errors", ref.id, len(report.errors))
         return report
 
     warnings = list(report.warnings)
@@ -101,6 +104,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
     try:
         ome_scene = scene_ome_metadata(ds, ref.id)
     except FileNotFoundError:
+        logger.warning("Skipping repair for scene %s because OME/METADATA.ome.xml is missing", ref.id)
         return RepairReport(
             scene_id=ref.id,
             persisted=False,
@@ -113,6 +117,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
         repaired_z, z_messages = _resolve_z_axis(ref.id, ome_scene)
         warnings.extend(z_messages)
         if repaired_z is not None:
+            logger.info("Resolved z axis for scene %s from %s", ref.id, repaired_z.source)
             axis_states["z"] = repaired_z
             repaired_axes["z"] = repaired_z
 
@@ -120,6 +125,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
         repaired_t, t_messages = _resolve_t_axis(ref.id, ome_scene)
         warnings.extend(t_messages)
         if repaired_t is not None:
+            logger.info("Resolved t axis for scene %s from %s", ref.id, repaired_t.source)
             axis_states["t"] = repaired_t
             repaired_axes["t"] = repaired_t
 
@@ -145,6 +151,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
         attrs["microio"] = microio
         write_scene_attrs(ds, ref.id, attrs)
         persisted = True
+        logger.info("Persisted repaired axes for scene %s: %s", ref.id, sorted(repaired_axes))
 
     return RepairReport(
         scene_id=ref.id,
@@ -156,6 +163,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
 
 
 def _apply_scene_axis_repairs(attrs: dict, repaired_axes: dict[str, AxisState], scene_id: str) -> None:
+    """Apply resolved axis values to a scene attrs payload in-place."""
     ms_list = attrs.get("multiscales", [])
     if not ms_list:
         raise ValueError(f"Scene {scene_id} has no multiscales metadata to repair")
@@ -181,6 +189,7 @@ def _apply_scene_axis_repairs(attrs: dict, repaired_axes: dict[str, AxisState], 
     attrs["multiscales"] = [multiscale]
 
 def _resolve_z_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[ValidationMessage]]:
+    """Resolve a scalar z spacing from OME pixel sizes or per-plane positions."""
     messages: list[ValidationMessage] = []
     unit, warn = normalize_unit(ome_scene.physical_size_z_unit)
     if ome_scene.physical_size_z is not None and ome_scene.physical_size_z > 0 and unit not in {None, "unknown"}:
@@ -230,6 +239,7 @@ def _resolve_z_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[Va
 
 
 def _resolve_t_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[ValidationMessage]]:
+    """Resolve a scalar t spacing from unambiguous OME timing metadata."""
     messages: list[ValidationMessage] = []
     unit, warn = normalize_unit(ome_scene.time_increment_unit)
     if ome_scene.time_increment is not None and ome_scene.time_increment > 0 and unit not in {None, "unknown"}:
@@ -262,6 +272,7 @@ def _resolve_t_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[Va
 
 
 def _infer_z_from_planes(ome_scene) -> tuple[float | None, str | None, list[ValidationMessage]]:
+    """Infer z spacing from per-plane ``PositionZ`` values when safe to do so."""
     by_stack: dict[tuple[int, int], list[tuple[int, float, str | None]]] = {}
     for plane in ome_scene.planes:
         raw_z = plane.get("PositionZ")

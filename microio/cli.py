@@ -12,7 +12,9 @@ from microio.common.logging_utils import setup_logging
 
 
 def _cmd_inspect(args) -> int:
+    """Run the inspection command and emit a JSON summary through logging."""
     logger = setup_logging(args.log_level)
+    logger.info("Running inspect for %s", args.input)
     ds = open_dataset(args.input)
     payload = {
         "path": str(ds.path),
@@ -20,6 +22,7 @@ def _cmd_inspect(args) -> int:
         "scene_refs": [_json_ready(scene) for scene in ds.list_scene_refs()],
         "scenes": {},
     }
+    logger.debug("Inspect found %d scene(s)", len(payload["scene_refs"]))
     for ref in ds.list_scene_refs():
         report = ds.validate_scene_data_flow(ref.id)
         try:
@@ -50,9 +53,17 @@ def _cmd_inspect(args) -> int:
 
 
 def _cmd_repair(args) -> int:
+    """Run table/axis validation and optional persistence for selected scenes."""
     logger = setup_logging(args.log_level)
     ds = open_dataset(args.input, mode="a" if args.persist or args.persist_table else "r")
     scene_ids = args.scene or ds.list_scenes()
+    logger.info(
+        "Running repair for %s on %d scene(s) (persist=%s persist_table=%s)",
+        args.input,
+        len(scene_ids),
+        args.persist,
+        args.persist_table,
+    )
     payload = {"path": str(ds.path), "scenes": {}}
     for scene_id in scene_ids:
         if args.persist_table:
@@ -78,6 +89,7 @@ def _cmd_repair(args) -> int:
 
 
 def _json_ready(value):
+    """Recursively convert dataclasses and mappings into JSON-ready values."""
     if is_dataclass(value):
         return {field.name: _json_ready(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, MappingProxyType):
@@ -90,6 +102,7 @@ def _json_ready(value):
 
 
 def main() -> int:
+    """Parse CLI arguments and dispatch to the selected subcommand."""
     parser = argparse.ArgumentParser(prog="microio")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
