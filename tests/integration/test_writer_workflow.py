@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import uuid
 
+import dask.array as da
 import numpy as np
 import zarr
 
@@ -92,6 +93,62 @@ def test_write_label_and_roi_on_v2_fixture(vsi_subset):
     assert "image-label" in label_group.attrs
     assert len(label_group.attrs["multiscales"][0]["datasets"]) == len(reopened.list_levels("0"))
     assert "image-label" not in roi_group.attrs
+
+
+def test_write_label_timepoints_on_test_labels_fixture(test_labels_subset):
+    ds = open_dataset(test_labels_subset, mode="a")
+    base_shape = (1, 1, 31, 3136, 3136)
+    base_chunks = (1, 1, 1, 1024, 1024)
+
+    def pattern(z_range: tuple[int, int], y_range: tuple[int, int], x_range: tuple[int, int], value: int):
+        template = da.zeros(base_shape, chunks=base_chunks, dtype=np.uint16)
+
+        def _fill(block, block_info=None):
+            arr = np.zeros(block.shape, dtype=np.uint16)
+            location = block_info[None]["array-location"]
+            z_loc, y_loc, x_loc = location[2], location[3], location[4]
+            z_start = max(z_range[0], z_loc[0])
+            z_stop = min(z_range[1], z_loc[1])
+            y_start = max(y_range[0], y_loc[0])
+            y_stop = min(y_range[1], y_loc[1])
+            x_start = max(x_range[0], x_loc[0])
+            x_stop = min(x_range[1], x_loc[1])
+            if z_start < z_stop and y_start < y_stop and x_start < x_stop:
+                arr[
+                    :,
+                    :,
+                    z_start - z_loc[0] : z_stop - z_loc[0],
+                    y_start - y_loc[0] : y_stop - y_loc[0],
+                    x_start - x_loc[0] : x_stop - x_loc[0],
+                ] = value
+            return arr
+
+        return template.map_blocks(_fill, dtype=np.uint16)
+
+    frame_a = pattern((0, 2), (0, 16), (0, 16), 5)
+    frame_b = pattern((10, 12), (32, 48), (48, 64), 9)
+
+    report_a = ds.write_label_timepoint("0", "segmentation", frame_a, timepoint=2, attrs={"source_channel": 0})
+    report_b = ds.write_label_timepoint("0", "segmentation", frame_b, timepoint=7)
+
+    reopened = open_dataset(test_labels_subset)
+    label_group = reopened.root["0"]["labels"]["segmentation"]
+    level0 = label_group["0"]
+    level1 = label_group["1"]
+
+    assert report_a.initialized is True
+    assert report_b.initialized is False
+    assert report_a.written_timepoint == 2
+    assert report_b.written_timepoint == 7
+    assert label_group.attrs["microio"]["label-attrs"] == {"source_channel": 0}
+    assert label_group.attrs["microio"]["written_timepoints"] == [2, 7]
+    assert int(level0[2, 0, 0, 0, 0]) == 5
+    assert int(level0[2, 0, 10, 40, 50]) == 0
+    assert int(level0[7, 0, 10, 40, 50]) == 9
+    assert int(level0[0, 0, 0, 0, 0]) == 0
+    assert level1.shape == (21, 1, 31, 1568, 1568)
+    assert int(level1[2, 0, 0, 0, 0]) == 5
+    assert int(level1[7, 0, 10, 20, 25]) == 9
 
 
 def _create_small_dataset(path: Path) -> Path:

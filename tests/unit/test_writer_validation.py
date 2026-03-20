@@ -105,6 +105,19 @@ def test_write_label_image_rejects_non_integer_dtype():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
+def test_write_label_image_nests_user_attrs_under_microio():
+    dataset = _fresh_dataset_path("writer_label_attrs")
+    try:
+        _create_writable_dataset(dataset)
+        ds = open_dataset(dataset, mode="a")
+        ds.write_label_image("0", "mask", np.zeros((1, 1, 1, 4, 4), dtype=np.uint16), attrs={"kind": "segmentation"})
+        label_group = ds.root["0"]["labels"]["mask"]
+        assert label_group.attrs["microio"]["label-attrs"] == {"kind": "segmentation"}
+        assert "kind" not in label_group.attrs
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
 def test_write_methods_reject_read_only_handle():
     dataset = _fresh_dataset_path("writer_readonly")
     try:
@@ -120,6 +133,33 @@ def test_write_methods_reject_read_only_handle():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
+def test_write_label_image_accepts_singleton_channel_for_multichannel_source():
+    dataset = _fresh_dataset_path("writer_label_singleton_channel")
+    try:
+        _create_writable_dataset(dataset, channels=2)
+        ds = open_dataset(dataset, mode="a")
+        label_data = np.zeros((1, 1, 1, 4, 4), dtype=np.uint16)
+        label_data[..., 1:3, 1:3] = 2
+        report = ds.write_label_image("0", "mask", label_data)
+        label_group = ds.root["0"]["labels"]["mask"]
+        assert report.shape == (1, 1, 1, 4, 4)
+        assert label_group["0"].shape == (1, 1, 1, 4, 4)
+        assert label_group.attrs["microio"]["channel_mode"] == "singleton"
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_write_label_image_rejects_invalid_channel_size():
+    dataset = _fresh_dataset_path("writer_label_bad_channel")
+    try:
+        _create_writable_dataset(dataset, channels=2)
+        ds = open_dataset(dataset, mode="a")
+        with pytest.raises(ValueError, match="channel axis"):
+            ds.write_label_image("0", "mask", np.zeros((1, 3, 1, 4, 4), dtype=np.uint16))
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
 def test_write_roi_normalizes_integer_axis_without_squeezing():
     dataset = _fresh_dataset_path("writer_roi_index")
     try:
@@ -130,6 +170,54 @@ def test_write_roi_normalizes_integer_axis_without_squeezing():
         assert report.shape == (1, 1, 1, 2, 2)
         assert roi.shape == (1, 1, 1, 2, 2)
         assert ds.root["0"]["rois"]["roi"].attrs["microio"]["slices"]["t"]["indexed"] is True
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_write_label_timepoint_initializes_and_tracks_written_frames():
+    dataset = _fresh_dataset_path("writer_label_timepoint")
+    try:
+        _create_writable_dataset(dataset, levels=2, times=3)
+        ds = open_dataset(dataset, mode="a")
+        first = np.zeros((1, 1, 1, 4, 4), dtype=np.uint16)
+        first[..., 0:2, 0:2] = 3
+        report = ds.write_label_timepoint("0", "mask", first, timepoint=1)
+
+        label_group = ds.root["0"]["labels"]["mask"]
+        assert report.written_timepoint == 1
+        assert report.initialized is True
+        assert label_group["0"].shape == (3, 1, 1, 4, 4)
+        assert label_group["0"][1, 0, 0, 0:2, 0:2].tolist() == [[3, 3], [3, 3]]
+        assert int(label_group["0"][0, 0, 0, 0, 0]) == 0
+        assert label_group.attrs["microio"]["written_timepoints"] == [1]
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_write_label_timepoint_rejects_duplicate_without_overwrite():
+    dataset = _fresh_dataset_path("writer_label_timepoint_duplicate")
+    try:
+        _create_writable_dataset(dataset, times=3)
+        ds = open_dataset(dataset, mode="a")
+        frame = np.ones((1, 1, 1, 4, 4), dtype=np.uint16)
+        ds.write_label_timepoint("0", "mask", frame, timepoint=0)
+        with pytest.raises(FileExistsError, match="overwrite_timepoint=True"):
+            ds.write_label_timepoint("0", "mask", frame, timepoint=0)
+        ds.write_label_timepoint("0", "mask", np.full((1, 1, 1, 4, 4), 2, dtype=np.uint16), timepoint=0, overwrite_timepoint=True)
+        assert int(ds.root["0"]["labels"]["mask"]["0"][0, 0, 0, 0, 0]) == 2
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_write_label_timepoint_rejects_metadata_updates_on_existing_label():
+    dataset = _fresh_dataset_path("writer_label_timepoint_metadata")
+    try:
+        _create_writable_dataset(dataset, times=2)
+        ds = open_dataset(dataset, mode="a")
+        frame = np.ones((1, 1, 1, 4, 4), dtype=np.uint16)
+        ds.write_label_timepoint("0", "mask", frame, timepoint=0)
+        with pytest.raises(ValueError, match="cannot accept dtype, chunks, attrs, colors, or properties"):
+            ds.write_label_timepoint("0", "mask", frame, timepoint=1, attrs={"kind": "second"})
     finally:
         shutil.rmtree(dataset, ignore_errors=True)
 
@@ -222,7 +310,7 @@ def test_write_label_image_overwrite_refreshes_listing():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
-def _create_writable_dataset(path: Path, *, zarr_format: int = 3, levels: int = 1) -> Path:
+def _create_writable_dataset(path: Path, *, zarr_format: int = 3, levels: int = 1, times: int = 1, channels: int = 1) -> Path:
     root = zarr.open(path, mode="w", zarr_format=zarr_format)
     scene = root.create_group("0")
     multiscales = [
@@ -250,7 +338,7 @@ def _create_writable_dataset(path: Path, *, zarr_format: int = 3, levels: int = 
     else:
         scene.attrs["multiscales"] = multiscales
 
-    level0 = np.arange(16, dtype=np.uint16).reshape(1, 1, 1, 4, 4)
+    level0 = np.arange(times * channels * 1 * 4 * 4, dtype=np.uint16).reshape(times, channels, 1, 4, 4)
     scene.create_array(
         "0",
         data=level0,
@@ -268,7 +356,7 @@ def _create_writable_dataset(path: Path, *, zarr_format: int = 3, levels: int = 
     else:
         ome.attrs["series"] = ["0"]
     (path / "OME" / "METADATA.ome.xml").write_text(
-        '<?xml version="1.0" encoding="UTF-8"?><OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image Name="scene"><Pixels SizeT="1" SizeC="1" SizeZ="1" SizeY="4" SizeX="4"/></Image></OME>',
+        f'<?xml version="1.0" encoding="UTF-8"?><OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image Name="scene"><Pixels SizeT="{times}" SizeC="{channels}" SizeZ="1" SizeY="4" SizeX="4"/></Image></OME>',
         encoding="utf-8",
     )
     return path

@@ -48,3 +48,17 @@ def vsi_subset() -> Path:
     finally:
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture()
+def test_labels_subset() -> Path:
+    path = clone_scene_subset(
+        DATA_ROOT / "test_labels.zarr",
+        _fresh_dir("test_labels_subset"),
+        ["0"],
+    )
+    try:
+        yield path
+    finally:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)

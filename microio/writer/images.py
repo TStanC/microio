@@ -30,6 +30,7 @@ from microio.writer.common import (
     source_level_metadata,
     source_pyramid_metadata,
     write_array,
+    write_array_region,
 )
 
 
@@ -62,10 +63,11 @@ def write_label_image(
     name:
         Label image name to create under the scene ``labels/`` group.
     data:
-        Integer-valued label image for source level ``0``. The shape must match
-        the source level-0 image exactly. The library expects the dataset axis
-        order ``("t", "c", "z", "y", "x")`` and therefore expects the label
-        data to follow that same order.
+        Integer-valued label image for source level ``0``. The library expects
+        dataset axis order ``("t", "c", "z", "y", "x")`` and therefore expects
+        the label data to follow that same order. The label channel axis may
+        either match the source image channel size or use a singleton size of
+        ``1`` when one label volume applies to all source channels.
     source_level:
         Source multiscale level. Only ``0`` is accepted.
     chunks:
@@ -73,8 +75,9 @@ def write_label_image(
     dtype:
         Optional integer dtype to cast ``data`` to before writing.
     attrs:
-        Optional extra non-OME attributes to store on the label group, for
-        example ``{"description": "nucleus segmentation"}``.
+        Optional extra label metadata to store under
+        ``label_group.attrs["microio"]["label-attrs"]``, for example
+        ``{"description": "nucleus segmentation"}``.
     colors:
         Optional NGFF image-label color metadata, for example
         ``[{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 7, "rgba": [255, 255, 0, 255]}]``.
@@ -95,75 +98,54 @@ def write_label_image(
     -----
     The function writes the level-0 label image directly and derives coarser
     label levels from the source image pyramid metadata. Existing targets are
-    preserved unless ``overwrite=True`` is supplied.
+    preserved unless ``overwrite=True`` is supplied. This is the whole-image
+    write path; for caller-coordinated parallel writes by timepoint, use
+    :func:`write_label_timepoint`.
     """
-    if str(source_level) != "0":
-        raise ValueError("Label pyramids must be derived from source level 0 to remain NGFF-consistent")
-
+    _validate_label_source_level(source_level)
     ref = require_writeable_scene(ds, scene)
     logger.info("Writing label image %s for scene %s", name, ref.id)
-    _, multiscale, source_datasets = source_pyramid_metadata(ds, ref.id)
-
     array_like = maybe_cast_array(coerce_array(data), dtype)
-    level0 = ds.level_ref(ref.id, 0)
+    dtype_obj = _validate_label_array_dtype(array_like)
     shape = tuple(int(dim) for dim in array_like.shape)
-    if shape != tuple(int(dim) for dim in level0.shape):
-        raise ValueError(f"Label image shape {shape} does not match source level shape {level0.shape}")
+    _validate_full_label_shape(shape, tuple(int(dim) for dim in ds.level_ref(ref.id, 0).shape))
 
-    dtype_obj = np.dtype(array_like.dtype)
-    if not np.issubdtype(dtype_obj, np.integer):
-        raise ValueError(f"Label images must use an integer dtype, received {dtype_obj}")
+    state = _prepare_label_group(
+        ds,
+        ref.id,
+        name,
+        label_shape=shape,
+        dtype_obj=dtype_obj,
+        dtype_requested=dtype is not None,
+        chunks=chunks,
+        attrs=attrs,
+        colors=colors,
+        properties=properties,
+        overwrite=overwrite,
+        write_mode="full",
+    )
 
-    _validate_label_name(name)
-    resolved_colors = _normalize_label_colors(colors)
-    resolved_properties = _normalize_label_properties(properties)
-
-    labels = require_child_group(ds.root[ref.id], "labels")
-    ensure_group_absent_or_overwrite(labels, name, overwrite=overwrite)
-    label_group = labels.create_group(name)
-
-    axes = tuple(axis["name"] for axis in multiscale["axes"])
-    base = array_like
     written_paths: list[str] = []
-    for dataset_md in source_datasets:
+    for dataset_md in state["source_datasets"]:
         path = str(dataset_md["path"])
-        target_shape = tuple(int(dim) for dim in ds.level_ref(ref.id, path).shape)
-        level_data = _resample_label_level(base, target_shape)
-        level_dtype = np.dtype(level_data.dtype)
-        level_chunks = default_chunks(target_shape, level_dtype, chunks)
+        target_shape = tuple(int(dim) for dim in state["level_shapes"][path])
+        level_data = _resample_label_level(array_like, target_shape)
         logger.debug(
-            "Writing label level %s for %s/%s with shape=%s chunks=%s",
+            "Writing label level %s for %s/%s with shape=%s",
             path,
             ref.id,
             name,
             target_shape,
-            level_chunks,
         )
-        write_array(
-            label_group,
-            path,
+        write_array_region(
+            state["label_group"][path],
             level_data,
-            chunks=level_chunks,
+            region=_full_region(target_shape),
             threads=threads,
-            dimension_names=axes if group_zarr_format(label_group) >= 3 else None,
         )
         written_paths.append(path)
 
-    replace_node_ome_metadata(
-        labels,
-        {"labels": _updated_label_listing(labels, name)},
-    )
-    replace_node_ome_metadata(
-        label_group,
-        _label_group_ome_metadata(
-            multiscale=multiscale,
-            source_datasets=source_datasets,
-            name=name,
-            colors=resolved_colors,
-            properties=resolved_properties,
-        ),
-        extra_attrs=_label_extra_attrs(ref.id, level0.path, attrs),
-    )
+    _persist_written_timepoints(state["label_group"], range(shape[0]))
     ds.invalidate_caches(scene_id=ref.id)
     return LabelWriteReport(
         scene_id=ref.id,
@@ -172,6 +154,144 @@ def write_label_image(
         shape=shape,
         dtype=str(dtype_obj),
         persisted=True,
+        initialized=bool(state["initialized"]),
+    )
+
+
+def write_label_timepoint(
+    ds,
+    scene: int | str,
+    name: str,
+    data: Any,
+    *,
+    timepoint: int,
+    source_level: int | str = 0,
+    chunks: tuple[int, ...] | None = None,
+    dtype: Any | None = None,
+    attrs: dict[str, Any] | None = None,
+    colors: list[dict[str, Any]] | None = None,
+    properties: list[dict[str, Any]] | None = None,
+    overwrite: bool = False,
+    overwrite_timepoint: bool = False,
+    threads: int | None = None,
+) -> LabelWriteReport:
+    """Write one timepoint of an NGFF-compliant label pyramid.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle opened in a writable mode.
+    scene:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    name:
+        Label image name stored under the scene ``labels/`` group.
+    data:
+        Integer-valued label image in dataset axis order with a singleton
+        leading time dimension. The non-time axes must match source level ``0``
+        except that the label channel axis may be ``1`` or the source channel
+        size.
+    timepoint:
+        Source-scene time index to populate.
+    source_level:
+        Source multiscale level. Only ``0`` is accepted.
+    chunks:
+        Optional chunk shape override used only when a new label image group is
+        initialized in this call.
+    dtype:
+        Optional integer dtype to cast ``data`` to before writing. Existing
+        label images reject dtype changes unless they are recreated through
+        ``overwrite=True``.
+    attrs:
+        Optional extra label metadata to store under
+        ``label_group.attrs["microio"]["label-attrs"]`` when the label image is
+        initialized in this call.
+    colors:
+        Optional NGFF image-label color metadata applied when the label image is
+        initialized in this call.
+    properties:
+        Optional NGFF image-label properties metadata applied when the label
+        image is initialized in this call.
+    overwrite:
+        Whether to replace an existing label image group before writing the
+        requested timepoint.
+    overwrite_timepoint:
+        Whether to allow rewriting a timepoint already recorded in the label
+        group's ``microio.written_timepoints`` metadata.
+    threads:
+        Optional worker count for array writes.
+
+    Returns
+    -------
+    LabelWriteReport
+        Structured summary of the written label image update, including the
+        written timepoint and whether initialization happened in this call.
+
+    Notes
+    -----
+    This API is intended for caller-coordinated parallelism across disjoint
+    timepoints. The library does not provide cross-process locking or work
+    claiming for independent writers targeting the same label group.
+    """
+    _validate_label_source_level(source_level)
+    ref = require_writeable_scene(ds, scene)
+    logger.info("Writing label timepoint %s for %s/%s", timepoint, ref.id, name)
+    array_like = maybe_cast_array(coerce_array(data), dtype)
+    dtype_obj = _validate_label_array_dtype(array_like)
+    shape = tuple(int(dim) for dim in array_like.shape)
+    if shape[0] != 1:
+        raise ValueError(f"Timepoint label writes require a singleton t axis, received shape {shape}")
+
+    state = _prepare_label_group(
+        ds,
+        ref.id,
+        name,
+        label_shape=_validate_timepoint_label_shape(
+            shape,
+            tuple(int(dim) for dim in ds.level_ref(ref.id, 0).shape),
+            timepoint=timepoint,
+        )[0],
+        dtype_obj=dtype_obj,
+        dtype_requested=dtype is not None,
+        chunks=chunks,
+        attrs=attrs,
+        colors=colors,
+        properties=properties,
+        overwrite=overwrite,
+        write_mode="timepoint",
+    )
+    _validate_existing_timepoint_write(
+        state["label_group"],
+        timepoint=timepoint,
+        overwrite_timepoint=overwrite_timepoint,
+        initialized=bool(state["initialized"]),
+    )
+
+    written_paths: list[str] = []
+    for dataset_md in state["source_datasets"]:
+        path = str(dataset_md["path"])
+        target_shape = tuple(int(dim) for dim in state["level_shapes"][path])
+        level_data = _resample_label_level(array_like, (1, *target_shape[1:]))
+        region = _timepoint_region(target_shape, timepoint)
+        logger.debug("Writing label timepoint %s level %s for %s/%s", timepoint, path, ref.id, name)
+        write_array_region(
+            state["label_group"][path],
+            level_data,
+            region=region,
+            threads=threads,
+        )
+        written_paths.append(path)
+
+    _persist_written_timepoints(state["label_group"], [timepoint])
+    ds.invalidate_caches(scene_id=ref.id)
+    return LabelWriteReport(
+        scene_id=ref.id,
+        label_name=name,
+        level_path=written_paths[0],
+        shape=shape,
+        dtype=str(dtype_obj),
+        persisted=True,
+        written_timepoint=int(timepoint),
+        initialized=bool(state["initialized"]),
     )
 
 
@@ -295,17 +415,220 @@ def _roi_group_ome_metadata(multiscale: dict[str, Any], dataset_md: dict[str, An
     return {"multiscales": [_single_scale_multiscale(multiscale, roi_dataset_md, name)]}
 
 
-def _label_extra_attrs(scene_id: str, source_level_path: str, attrs: dict[str, Any] | None) -> dict[str, Any]:
+def _validate_label_source_level(source_level: int | str) -> None:
+    """Reject label writes derived from non-zero source levels."""
+    if str(source_level) != "0":
+        raise ValueError("Label pyramids must be derived from source level 0 to remain NGFF-consistent")
+
+
+def _validate_label_array_dtype(data: Any) -> np.dtype:
+    """Return the validated integer dtype for one label payload."""
+    dtype_obj = np.dtype(data.dtype)
+    if not np.issubdtype(dtype_obj, np.integer):
+        raise ValueError(f"Label images must use an integer dtype, received {dtype_obj}")
+    return dtype_obj
+
+
+def _validate_full_label_shape(shape: tuple[int, ...], source_shape: tuple[int, ...]) -> str:
+    """Validate whole-image label shape against source level ``0``."""
+    if len(shape) != len(source_shape):
+        raise ValueError(f"Label image shape {shape} does not match source level shape {source_shape}")
+    if shape[0] != source_shape[0] or shape[2:] != source_shape[2:]:
+        raise ValueError(f"Label image shape {shape} does not match source level shape {source_shape}")
+    return _channel_mode(shape[1], source_shape[1])
+
+
+def _validate_timepoint_label_shape(
+    shape: tuple[int, ...],
+    source_shape: tuple[int, ...],
+    *,
+    timepoint: int,
+) -> tuple[tuple[int, ...], str]:
+    """Validate a singleton-time label payload and expand it to full label shape."""
+    if not 0 <= int(timepoint) < int(source_shape[0]):
+        raise ValueError(f"Timepoint {timepoint} is out of bounds for source size {source_shape[0]}")
+    if len(shape) != len(source_shape):
+        raise ValueError(f"Timepoint label image shape {shape} does not match source level rank {source_shape}")
+    if shape[0] != 1 or shape[2:] != source_shape[2:]:
+        raise ValueError(f"Timepoint label image shape {shape} does not match source level shape {source_shape}")
+    channel_mode = _channel_mode(shape[1], source_shape[1])
+    return (int(source_shape[0]), int(shape[1]), *[int(dim) for dim in source_shape[2:]]), channel_mode
+
+
+def _channel_mode(label_c: int, source_c: int) -> str:
+    """Classify supported label channel layouts relative to the source image."""
+    if label_c == int(source_c):
+        return "source"
+    if label_c == 1:
+        return "singleton"
+    raise ValueError(f"Label channel axis must be 1 or match source channel size {source_c}, received {label_c}")
+
+
+def _prepare_label_group(
+    ds,
+    scene_id: str,
+    name: str,
+    *,
+    label_shape: tuple[int, ...],
+    dtype_obj: np.dtype,
+    dtype_requested: bool,
+    chunks: tuple[int, ...] | None,
+    attrs: dict[str, Any] | None,
+    colors: list[dict[str, Any]] | None,
+    properties: list[dict[str, Any]] | None,
+    overwrite: bool,
+    write_mode: str,
+):
+    """Return an initialized label group plus the derived source-level shapes."""
+    _validate_label_name(name)
+    _, multiscale, source_datasets = source_pyramid_metadata(ds, scene_id)
+    level0 = ds.level_ref(scene_id, 0)
+    source_shape = tuple(int(dim) for dim in level0.shape)
+    channel_mode = _channel_mode(int(label_shape[1]), int(source_shape[1]))
+    resolved_colors = _normalize_label_colors(colors)
+    resolved_properties = _normalize_label_properties(properties)
+
+    labels = require_child_group(ds.root[scene_id], "labels")
+    initialized = False
+    label_group = labels[name] if name in labels else None
+    if label_group is not None and overwrite:
+        ensure_group_absent_or_overwrite(labels, name, overwrite=True)
+        label_group = None
+
+    if label_group is None:
+        label_group = labels.create_group(name)
+        level_shapes = _label_level_shapes(ds, scene_id, label_shape, source_datasets)
+        axes = tuple(axis["name"] for axis in multiscale["axes"])
+        for dataset_md in source_datasets:
+            path = str(dataset_md["path"])
+            target_shape = level_shapes[path]
+            target_chunks = default_chunks(target_shape, dtype_obj, chunks)
+            label_group.create_array(
+                path,
+                shape=target_shape,
+                dtype=dtype_obj,
+                chunks=target_chunks,
+                dimension_names=axes if group_zarr_format(label_group) >= 3 else None,
+                overwrite=True,
+                write_data=False,
+            )
+        replace_node_ome_metadata(labels, {"labels": _updated_label_listing(labels, name)})
+        replace_node_ome_metadata(
+            label_group,
+            _label_group_ome_metadata(
+                multiscale=multiscale,
+                source_datasets=source_datasets,
+                name=name,
+                colors=resolved_colors,
+                properties=resolved_properties,
+            ),
+            extra_attrs=_label_extra_attrs(
+                scene_id,
+                level0.path,
+                attrs,
+                channel_mode=channel_mode,
+                write_mode=write_mode,
+                written_timepoints=[],
+            ),
+        )
+        initialized = True
+    else:
+        if write_mode != "timepoint":
+            raise FileExistsError(f"{label_group.path} already exists; pass overwrite=True to replace it.")
+        if dtype_requested or chunks is not None or attrs is not None or colors is not None or properties is not None:
+            raise ValueError(
+                "Existing label images cannot accept dtype, chunks, attrs, colors, or properties updates unless overwrite=True"
+            )
+        level_shapes = _label_level_shapes(ds, scene_id, label_shape, source_datasets)
+        _validate_existing_label_group(label_group, level_shapes, dtype_obj)
+
+    return {
+        "label_group": label_group,
+        "source_datasets": source_datasets,
+        "level_shapes": _label_level_shapes(ds, scene_id, label_shape, source_datasets),
+        "initialized": initialized,
+    }
+
+
+def _validate_existing_label_group(label_group, level_shapes: dict[str, tuple[int, ...]], dtype_obj: np.dtype) -> None:
+    """Ensure an existing label group matches the expected pyramid layout."""
+    microio = label_group.attrs.asdict().get("microio", {})
+    if "written_timepoints" not in microio:
+        raise ValueError("Existing label image lacks microio timepoint tracking; pass overwrite=True to recreate it.")
+    for path, shape in level_shapes.items():
+        if path not in label_group:
+            raise ValueError(f"Existing label image is missing pyramid level {path!r}")
+        array = label_group[path]
+        if tuple(int(dim) for dim in array.shape) != shape:
+            raise ValueError(f"Existing label level {path!r} shape {array.shape} does not match expected {shape}")
+        if np.dtype(array.dtype) != dtype_obj:
+            raise ValueError(f"Existing label dtype {array.dtype} does not match incoming dtype {dtype_obj}")
+
+
+def _label_level_shapes(ds, scene_id: str, label_shape: tuple[int, ...], source_datasets: list[dict[str, Any]]) -> dict[str, tuple[int, ...]]:
+    """Return expected label-array shapes for every pyramid level."""
+    out: dict[str, tuple[int, ...]] = {}
+    for dataset_md in source_datasets:
+        path = str(dataset_md["path"])
+        source_shape = list(int(dim) for dim in ds.level_ref(scene_id, path).shape)
+        source_shape[1] = int(label_shape[1])
+        out[path] = tuple(source_shape)
+    return out
+
+
+def _full_region(shape: tuple[int, ...]) -> tuple[slice, ...]:
+    """Return a region covering a full array shape."""
+    return tuple(slice(0, int(dim)) for dim in shape)
+
+
+def _timepoint_region(shape: tuple[int, ...], timepoint: int) -> tuple[slice, ...]:
+    """Return the array region selecting one timepoint in a full label array."""
+    return (slice(int(timepoint), int(timepoint) + 1),) + tuple(slice(0, int(dim)) for dim in shape[1:])
+
+
+def _persist_written_timepoints(label_group, timepoints: Any) -> None:
+    """Merge newly written timepoints into the label group's microio metadata."""
+    microio = dict(label_group.attrs.asdict().get("microio", {}))
+    current = {int(item) for item in microio.get("written_timepoints", [])}
+    current.update(int(item) for item in timepoints)
+    microio["written_timepoints"] = sorted(current)
+    label_group.attrs["microio"] = microio
+
+
+def _validate_existing_timepoint_write(label_group, *, timepoint: int, overwrite_timepoint: bool, initialized: bool) -> None:
+    """Apply overwrite protection for writes into an existing label image."""
+    if initialized:
+        return
+    microio = dict(label_group.attrs.asdict().get("microio", {}))
+    written = {int(item) for item in microio.get("written_timepoints", [])}
+    if int(timepoint) in written and not overwrite_timepoint:
+        raise FileExistsError(
+            f"Timepoint {timepoint} for {label_group.path} already exists; pass overwrite_timepoint=True to replace it."
+        )
+
+
+def _label_extra_attrs(
+    scene_id: str,
+    source_level_path: str,
+    attrs: dict[str, Any] | None,
+    *,
+    channel_mode: str,
+    write_mode: str,
+    written_timepoints: list[int],
+) -> dict[str, Any]:
+    """Build the non-OME microio metadata block for a label image group."""
     microio = {
         "schema": MICROIO_WRITER_LABEL_SCHEMA,
         "schema_version": MICROIO_WRITER_LABEL_SCHEMA_VERSION,
         "source_scene_id": scene_id,
         "source_level": str(source_level_path),
+        "channel_mode": channel_mode,
+        "write_mode": write_mode,
+        "written_timepoints": [int(item) for item in written_timepoints],
     }
-    extra = {"microio": microio}
     if attrs:
-        extra.update(attrs)
-    return extra
+        microio["label-attrs"] = deepcopy(attrs)
+    return {"microio": microio}
 
 
 def _roi_extra_attrs(

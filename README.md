@@ -21,7 +21,7 @@ pip install git+https://github.com/TStanC/microio.git
 - Exposes image levels as lazy Dask arrays, raw Zarr arrays, or eager NumPy arrays
 - Builds and loads per-plane coordinate tables from OME plane metadata
 - Repairs placeholder `z` metadata when stronger OME evidence exists
-- Writes scene-local tables, NGFF label images, and single-scale ROI cutouts
+- Writes scene-local tables, NGFF label images, timepoint-scoped label updates, and single-scale ROI cutouts
 
 ## Safety Boundaries
 
@@ -91,6 +91,14 @@ ds.write_label_image(
     ],
 )
 
+ds.write_label_timepoint(
+    "0",
+    "segmentation_by_t",
+    np.zeros((1, 1, *ds.level_ref("0", 0).shape[2:]), dtype=np.uint16),
+    timepoint=0,
+    attrs={"source_channel": 0},
+)
+
 ds.write_roi(
     "0",
     "roi_1",
@@ -103,6 +111,9 @@ Notes:
 - `write_table()` also accepts pandas `DataFrame` input when pandas is installed
 - Write APIs are fail-safe by default and require `overwrite=True` to replace an existing target
 - `write_label_image()` writes integer label pyramids aligned to the source image pyramid
+- `write_label_timepoint()` initializes or reuses a label pyramid and writes one timepoint with caller-coordinated overwrite protection
+- Label-image user attrs are stored under `label_group.attrs["microio"]["label-attrs"]`
+- Label-image channel size may match the source image channel size or use `1` when one label volume applies to all source channels
 - `write_roi()` is a microio extension for single-scale cutouts and is not stored as an NGFF label image
 
 ## CLI
@@ -129,7 +140,7 @@ microio repair --input path/to/dataset.zarr --scene 0 --persist-table --persist 
 - `DatasetHandle.validate_scene_data_flow()`
 - `DatasetHandle.build_plane_table()`, `ensure_plane_table()`, `load_plane_table()`
 - `DatasetHandle.inspect_axis_metadata()`, `repair_axis_metadata()`
-- `DatasetHandle.write_table()`, `write_label_image()`, `write_roi()`
+- `DatasetHandle.write_table()`, `write_label_image()`, `write_label_timepoint()`, `write_roi()`
 
 For implementation details, consult the package docstrings or DeepWiki.
 

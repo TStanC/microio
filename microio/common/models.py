@@ -257,7 +257,28 @@ class TableWriteReport:
 
 @dataclass
 class LabelWriteReport:
-    """Result of writing one label image."""
+    """Result of writing one label image.
+
+    Attributes
+    ----------
+    scene_id:
+        Canonical scene id that owns the label image.
+    label_name:
+        Scene-local label image name under ``labels/``.
+    level_path:
+        Finest written pyramid path, usually ``"0"``.
+    shape:
+        Shape of the payload passed to the write call.
+    dtype:
+        String form of the written label dtype.
+    persisted:
+        Whether the write completed successfully.
+    written_timepoint:
+        Timepoint written by :meth:`DatasetHandle.write_label_timepoint`, or
+        ``None`` for whole-image writes.
+    initialized:
+        Whether the label image group was created in this call.
+    """
 
     scene_id: str
     label_name: str
@@ -265,6 +286,8 @@ class LabelWriteReport:
     shape: tuple[int, ...]
     dtype: str
     persisted: bool
+    written_timepoint: int | None = None
+    initialized: bool = False
 
 
 @dataclass
@@ -667,9 +690,10 @@ class DatasetHandle:
     ) -> LabelWriteReport:
         """Write an NGFF-style label pyramid under ``labels/<name>``.
 
-        This method expects a level-0 label image whose shape matches the
-        source scene exactly. It then derives any coarser levels from the
-        source pyramid metadata.
+        This method expects a level-0 label image in dataset axis order. The
+        label channel axis may match the source scene or be a singleton size of
+        ``1`` when one label volume applies to all source channels. Any
+        coarser levels are derived from the source pyramid metadata.
         """
         from microio.writer.images import write_label_image
 
@@ -685,6 +709,48 @@ class DatasetHandle:
             colors=colors,
             properties=properties,
             overwrite=overwrite,
+            threads=threads,
+        )
+
+    def write_label_timepoint(
+        self,
+        scene: int | str,
+        name: str,
+        data: Any,
+        *,
+        timepoint: int,
+        source_level: int | str = 0,
+        chunks: tuple[int, ...] | None = None,
+        dtype: Any | None = None,
+        attrs: dict[str, Any] | None = None,
+        colors: list[dict[str, Any]] | None = None,
+        properties: list[dict[str, Any]] | None = None,
+        overwrite: bool = False,
+        overwrite_timepoint: bool = False,
+        threads: int | None = None,
+    ) -> LabelWriteReport:
+        """Write one timepoint of an NGFF-style label image under ``labels/<name>``.
+
+        The input must follow dataset axis order, keep all dimensions, and use
+        a singleton time axis of length ``1``. This method is intended for
+        caller-coordinated writes into disjoint timepoints of one label image.
+        """
+        from microio.writer.images import write_label_timepoint
+
+        return write_label_timepoint(
+            self,
+            scene,
+            name,
+            data,
+            timepoint=timepoint,
+            source_level=source_level,
+            chunks=chunks,
+            dtype=dtype,
+            attrs=attrs,
+            colors=colors,
+            properties=properties,
+            overwrite=overwrite,
+            overwrite_timepoint=overwrite_timepoint,
             threads=threads,
         )
 

@@ -202,6 +202,62 @@ def write_array(
     return target
 
 
+def write_array_region(
+    target,
+    data: Any,
+    *,
+    region: tuple[slice, ...],
+    threads: int | None = None,
+):
+    """Persist one array region into an already-existing array.
+
+    Parameters
+    ----------
+    target:
+        Existing Zarr array to update in-place.
+    data:
+        NumPy- or Dask-backed payload whose shape must match ``region``.
+    region:
+        Tuple of slices in target-array coordinates.
+    threads:
+        Optional worker count for Dask execution or NumPy chunked writes.
+    """
+    region_shape = tuple(int(index.stop - index.start) for index in region)
+    data_shape = tuple(int(dim) for dim in data.shape)
+    if data_shape != region_shape:
+        raise ValueError(f"Region shape {region_shape} does not match data shape {data_shape}")
+
+    if isinstance(data, da.Array):
+        chunks = tuple(
+            min(size, chunk if isinstance(chunk, int) else chunk[0])
+            for size, chunk in zip(region_shape, target.chunks, strict=True)
+        )
+        logger.debug("Writing Dask region %s with shape=%s threads=%s", target.path, region_shape, threads or 1)
+        with dask.config.set(scheduler="threads", num_workers=threads or 1):
+            da.store(data.rechunk(chunks), target, regions=region, lock=False, compute=True)
+        return target
+
+    arr = np.asarray(data)
+    logger.debug("Writing NumPy region %s with shape=%s threads=%s", target.path, region_shape, threads)
+    if threads is None or threads <= 1 or arr.ndim == 0:
+        target[region] = arr
+        return target
+
+    ranges = [(start, min(start + max(1, target.chunks[0]), arr.shape[0])) for start in range(0, arr.shape[0], max(1, target.chunks[0]))]
+
+    def _write_chunk(start: int, stop: int) -> None:
+        local_index = [slice(None)] * arr.ndim
+        local_index[0] = slice(start, stop)
+        target_index = list(region)
+        base = region[0]
+        target_index[0] = slice(base.start + start, base.start + stop)
+        target[tuple(target_index)] = arr[tuple(local_index)]
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        list(pool.map(lambda bounds: _write_chunk(*bounds), ranges))
+    return target
+
+
 def normalize_slice_spec(spec: Any) -> slice | int:
     """Accept the ROI slice forms supported by the public writer API.
 
