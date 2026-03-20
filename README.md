@@ -12,7 +12,7 @@ Current scope:
 - validate multiscale axis metadata
 - build per-plane coordinate tables
 - safely repair placeholder `z` metadata when stronger XML evidence exists
-- write scene-local tables, single-scale label images, and single-scale ROI cutouts programmatically
+- write scene-local tables, NGFF-style label images, and single-scale ROI cutouts programmatically
 
 Out of scope:
 - proprietary LIF/VSI conversion
@@ -46,13 +46,20 @@ from microio import open_dataset
 
 ds = open_dataset("path/to/dataset.zarr", mode="a")
 ds.write_table("0", "measurements", {"label_id": [1, 2], "volume": [10.5, 12.0]})
-ds.write_label_image("0", "segmentation", np.zeros(ds.level_ref("0", 0).shape, dtype=np.uint16))
+ds.write_label_image(
+    "0",
+    "segmentation",
+    np.zeros(ds.level_ref("0", 0).shape, dtype=np.uint16),
+    colors=[{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 1, "rgba": [0, 255, 0, 255]}],
+)
 ds.write_roi("0", "roi_1", {"t": (0, 2), "z": (0, 5), "y": (100, 300), "x": (200, 400)})
 ```
 
 Notes:
 - pandas `DataFrame` input is supported for `write_table` when pandas is installed
 - write APIs are fail-safe by default and require `overwrite=True` to replace existing targets
+- `write_label_image` writes integer label pyramids that follow the source image pyramid and stores NGFF label metadata in either v2-style attrs or v3 `ome` attrs depending on the target store
+- `write_roi` remains a microio extension for single-scale cutouts with provenance metadata; it is intentionally not written as an NGFF label image
 - the CLI remains limited to inspection and repair flows
 
 Reader safety rules:

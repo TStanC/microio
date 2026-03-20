@@ -397,6 +397,8 @@ class DatasetHandle:
         chunks: tuple[int, ...] | None = None,
         dtype: Any | None = None,
         attrs: dict[str, Any] | None = None,
+        colors: list[dict[str, Any]] | None = None,
+        properties: list[dict[str, Any]] | None = None,
         overwrite: bool = False,
         threads: int | None = None,
     ) -> LabelWriteReport:
@@ -411,6 +413,8 @@ class DatasetHandle:
             chunks=chunks,
             dtype=dtype,
             attrs=attrs,
+            colors=colors,
+            properties=properties,
             overwrite=overwrite,
             threads=threads,
         )

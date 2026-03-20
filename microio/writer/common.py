@@ -14,6 +14,7 @@ import numpy as np
 
 from microio.common.constants import ALLOWED_SCENE_WRITE_GROUPS
 from microio.common.mutations import require_writable
+from microio.common.ngff import node_zarr_format, non_ome_attrs, ome_metadata, replace_ome_attrs
 from microio.reader.metadata import level_ref, multiscale_metadata, scene_ref
 
 
@@ -52,6 +53,15 @@ def source_level_metadata(ds, scene: int | str, source_level: int | str) -> tupl
     dataset_md = next(item for item in ms["datasets"] if str(item.get("path")) == level.path)
     logger.debug("Loaded source level metadata for scene %s level %s", ref.id, level.path)
     return ref, ms, dataset_md
+
+
+def source_pyramid_metadata(ds, scene: int | str) -> tuple[Any, dict, list[Any]]:
+    """Load source-scene metadata used to seed full label pyramids."""
+    ref = scene_ref(ds, scene)
+    ms = deepcopy(multiscale_metadata(ds, ref.id))
+    datasets = [deepcopy(item) for item in ms["datasets"]]
+    logger.debug("Loaded source pyramid metadata for scene %s with %d levels", ref.id, len(datasets))
+    return ref, ms, datasets
 
 
 def default_chunks(shape: tuple[int, ...], dtype: np.dtype, chunks: tuple[int, ...] | None) -> tuple[int, ...]:
@@ -116,29 +126,34 @@ def maybe_cast_array(data: Any, dtype: Any | None):
     return cast
 
 
-def write_array(group, name: str, data: Any, *, chunks: tuple[int, ...], threads: int | None = None):
+def write_array(
+    group,
+    name: str,
+    data: Any,
+    *,
+    chunks: tuple[int, ...],
+    threads: int | None = None,
+    dimension_names: tuple[str, ...] | None = None,
+):
     """Persist one array using either Dask or NumPy-backed write paths."""
+    dtype = np.dtype(data.dtype) if hasattr(data, "dtype") else np.asarray(data).dtype
+    target = group.create_array(
+        name,
+        shape=tuple(int(dim) for dim in data.shape),
+        dtype=dtype,
+        chunks=chunks,
+        dimension_names=dimension_names,
+        overwrite=True,
+        write_data=False,
+    )
     if isinstance(data, da.Array):
         logger.debug("Writing Dask array %s/%s with chunks=%s threads=%s", group.path, name, chunks, threads or 1)
         with dask.config.set(scheduler="threads", num_workers=threads or 1):
-            da.to_zarr(
-                data.rechunk(chunks),
-                url=group.store,
-                component=f"{group.path}/{name}",
-                overwrite=True,
-                zarr_format=group.metadata.zarr_format,
-            )
-        return None
+            da.store(data.rechunk(chunks), target, lock=False, compute=True)
+        return target
 
     arr = np.asarray(data)
     logger.debug("Writing NumPy array %s/%s with chunks=%s threads=%s", group.path, name, chunks, threads)
-    target = group.create_array(
-        name,
-        shape=arr.shape,
-        dtype=arr.dtype,
-        chunks=chunks,
-        zarr_format=group.metadata.zarr_format,
-    )
     if threads is None or threads <= 1 or arr.ndim == 0:
         target[...] = arr
         return target
@@ -164,3 +179,21 @@ def normalize_slice_spec(spec: Any) -> slice | int:
     if isinstance(spec, int):
         return spec
     raise TypeError(f"Unsupported slice spec: {spec!r}")
+
+
+def replace_node_ome_metadata(node, ome: dict[str, Any], *, extra_attrs: dict[str, Any] | None = None) -> None:
+    """Persist semantic OME metadata in a format-compatible attrs layout."""
+    merged_extra = non_ome_attrs(node)
+    if extra_attrs:
+        merged_extra.update(deepcopy(extra_attrs))
+    replace_ome_attrs(node, ome, extra_attrs=merged_extra)
+
+
+def read_node_ome_metadata(node) -> dict[str, Any]:
+    """Return semantic OME metadata for a group or array."""
+    return ome_metadata(node)
+
+
+def group_zarr_format(node) -> int:
+    """Return a group's Zarr format number."""
+    return node_zarr_format(node)

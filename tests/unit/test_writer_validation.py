@@ -94,6 +94,17 @@ def test_write_label_image_rejects_shape_mismatch():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
+def test_write_label_image_rejects_non_integer_dtype():
+    dataset = _fresh_dataset_path("writer_label_dtype")
+    try:
+        _create_writable_dataset(dataset)
+        ds = open_dataset(dataset, mode="a")
+        with pytest.raises(ValueError, match="integer dtype"):
+            ds.write_label_image("0", "mask", np.zeros((1, 1, 1, 4, 4), dtype=np.float32))
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
 def test_write_methods_reject_read_only_handle():
     dataset = _fresh_dataset_path("writer_readonly")
     try:
@@ -123,6 +134,36 @@ def test_write_roi_normalizes_integer_axis_without_squeezing():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
+def test_write_label_image_creates_label_listing_and_multiscale_levels():
+    dataset = _fresh_dataset_path("writer_label_multiscale")
+    try:
+        _create_writable_dataset(dataset, zarr_format=3, levels=2)
+        ds = open_dataset(dataset, mode="a")
+        label_data = np.zeros((1, 1, 1, 4, 4), dtype=np.uint16)
+        label_data[..., 1:3, 1:3] = 4
+
+        report = ds.write_label_image(
+            "0",
+            "mask",
+            label_data,
+            colors=[{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 4, "rgba": [255, 0, 0, 255]}],
+            properties=[{"label-value": 4, "class": "nucleus"}],
+        )
+
+        scene_labels = ds.root["0"]["labels"]
+        label_group = scene_labels["mask"]
+        assert report.level_path == "0"
+        assert scene_labels.attrs["ome"]["labels"] == ["mask"]
+        assert label_group["0"].shape == (1, 1, 1, 4, 4)
+        assert label_group["1"].shape == (1, 1, 1, 2, 2)
+        assert label_group.attrs["ome"]["image-label"]["source"]["image"] == "../../"
+        assert label_group.attrs["ome"]["image-label"]["colors"][1]["label-value"] == 4
+        assert len(label_group.attrs["ome"]["multiscales"][0]["datasets"]) == 2
+        assert tuple(label_group["0"].metadata.dimension_names) == ("t", "c", "z", "y", "x")
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
 def test_write_roi_rejects_out_of_bounds_slice():
     dataset = _fresh_dataset_path("writer_roi_bounds")
     try:
@@ -130,6 +171,19 @@ def test_write_roi_rejects_out_of_bounds_slice():
         ds = open_dataset(dataset, mode="a")
         with pytest.raises(ValueError, match="out of bounds"):
             ds.write_roi("0", "roi", {"y": (0, 9)})
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_write_roi_does_not_emit_label_metadata():
+    dataset = _fresh_dataset_path("writer_roi_metadata")
+    try:
+        _create_writable_dataset(dataset, zarr_format=3)
+        ds = open_dataset(dataset, mode="a")
+        ds.write_roi("0", "roi", {"y": (0, 2), "x": (0, 2)})
+        roi_group = ds.root["0"]["rois"]["roi"]
+        assert "image-label" not in roi_group.attrs.get("ome", {})
+        assert len(roi_group.attrs["ome"]["multiscales"][0]["datasets"]) == 1
     finally:
         shutil.rmtree(dataset, ignore_errors=True)
 
@@ -152,35 +206,67 @@ def test_overwrite_guards_apply_to_tables_labels_and_rois():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
-def _create_writable_dataset(path: Path) -> Path:
-    root = zarr.open(path, mode="w")
+def test_write_label_image_overwrite_refreshes_listing():
+    dataset = _fresh_dataset_path("writer_label_overwrite")
+    try:
+        _create_writable_dataset(dataset, zarr_format=2)
+        ds = open_dataset(dataset, mode="a")
+        first = np.zeros((1, 1, 1, 4, 4), dtype=np.uint16)
+        second = np.ones((1, 1, 1, 4, 4), dtype=np.uint16)
+        ds.write_label_image("0", "mask", first)
+        ds.write_label_image("0", "mask", second, overwrite=True)
+        labels = ds.root["0"]["labels"]
+        assert labels.attrs["labels"] == ["mask"]
+        assert ds.root["0"]["labels"]["mask"]["0"][0, 0, 0, 0, 0] == 1
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def _create_writable_dataset(path: Path, *, zarr_format: int = 3, levels: int = 1) -> Path:
+    root = zarr.open(path, mode="w", zarr_format=zarr_format)
     scene = root.create_group("0")
-    scene.attrs.update(
+    multiscales = [
         {
-            "multiscales": [
+            "name": "scene",
+            "axes": [
+                {"name": "t", "type": "time"},
+                {"name": "c", "type": "channel"},
+                {"name": "z", "type": "space", "unit": "micrometer"},
+                {"name": "y", "type": "space", "unit": "micrometer"},
+                {"name": "x", "type": "space", "unit": "micrometer"},
+            ],
+            "datasets": [
                 {
-                    "name": "scene",
-                    "axes": [
-                        {"name": "t", "type": "time"},
-                        {"name": "c", "type": "channel"},
-                        {"name": "z", "type": "space", "unit": "micrometer"},
-                        {"name": "y", "type": "space", "unit": "micrometer"},
-                        {"name": "x", "type": "space", "unit": "micrometer"},
-                    ],
-                    "datasets": [
-                        {
-                            "path": "0",
-                            "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 2.0, 0.5, 0.5]}],
-                        }
-                    ],
-                    "version": "0.4",
+                    "path": str(level),
+                    "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 2.0, 0.5 * (2**level), 0.5 * (2**level)]}],
                 }
-            ]
+                for level in range(levels)
+            ],
+            "version": "0.4",
         }
+    ]
+    if zarr_format >= 3:
+        scene.attrs["ome"] = {"version": "0.5", "multiscales": multiscales}
+    else:
+        scene.attrs["multiscales"] = multiscales
+
+    level0 = np.arange(16, dtype=np.uint16).reshape(1, 1, 1, 4, 4)
+    scene.create_array(
+        "0",
+        data=level0,
+        dimension_names=("t", "c", "z", "y", "x") if zarr_format >= 3 else None,
     )
-    scene.create_array("0", data=np.arange(16, dtype=np.uint16).reshape(1, 1, 1, 4, 4))
+    if levels > 1:
+        scene.create_array(
+            "1",
+            data=level0[..., ::2, ::2],
+            dimension_names=("t", "c", "z", "y", "x") if zarr_format >= 3 else None,
+        )
     ome = root.create_group("OME")
-    ome.attrs["series"] = ["0"]
+    if zarr_format >= 3:
+        ome.attrs["ome"] = {"version": "0.5", "series": ["0"]}
+    else:
+        ome.attrs["series"] = ["0"]
     (path / "OME" / "METADATA.ome.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?><OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image Name="scene"><Pixels SizeT="1" SizeC="1" SizeZ="1" SizeY="4" SizeX="4"/></Image></OME>',
         encoding="utf-8",

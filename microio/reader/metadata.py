@@ -8,6 +8,7 @@ from pathlib import Path
 
 import dask.array as da
 from microio.common.constants import AXES_ORDER
+from microio.common.ngff import flattened_attrs
 from microio.common.models import DataFlowReport, LevelRef, SceneRef, ValidationMessage
 from microio.reader.ome_xml import OmeDocument, parse_ome_xml
 
@@ -131,7 +132,7 @@ def scene_name_matches(ds, name: str) -> list[SceneRef]:
 
 def root_metadata(ds) -> dict:
     """Return root-group attributes as a plain dictionary."""
-    return ds.root.attrs.asdict()
+    return flattened_attrs(ds.root)
 
 
 def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
@@ -358,7 +359,7 @@ def _ordered_scene_ids(ds) -> list[str]:
     """Return scene ids in stable dataset order, preferring OME series metadata."""
     ome_group = ds.root.get("OME")
     if ome_group is not None:
-        attrs = ome_group.attrs.asdict()
+        attrs = flattened_attrs(ome_group)
         series = attrs.get("series")
         if isinstance(series, list) and series:
             return [str(item) for item in series]
@@ -369,7 +370,7 @@ def _ordered_scene_ids(ds) -> list[str]:
 
 def _scene_name(ds, scene_id: str) -> str:
     """Extract the display name for one scene from multiscales metadata."""
-    attrs = ds.root[scene_id].attrs.asdict()
+    attrs = flattened_attrs(ds.root[scene_id])
     multiscales = attrs.get("multiscales")
     if isinstance(multiscales, list) and multiscales:
         return str(multiscales[0].get("name") or scene_id)
@@ -449,7 +450,7 @@ def _raw_scene_metadata(ds, scene_id: str) -> dict:
     cached = ds._raw_scene_metadata_cache.get(scene_id)
     if cached is None:
         logger.debug("Caching raw scene metadata for scene %s", scene_id)
-        cached = ds.root[scene_id].attrs.asdict()
+        cached = flattened_attrs(ds.root[scene_id])
         ds._raw_scene_metadata_cache[scene_id] = cached
     return cached
 
