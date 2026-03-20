@@ -51,7 +51,41 @@ def write_label_image(
     overwrite: bool = False,
     threads: int | None = None,
 ) -> LabelWriteReport:
-    """Write an NGFF-compliant label pyramid under ``labels/<name>``."""
+    """Write an NGFF-compliant label pyramid under ``labels/<name>``.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle opened in a writable mode.
+    scene:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    name:
+        Label image name to create under the scene ``labels/`` group.
+    data:
+        Integer-valued label image for source level ``0``. The shape must match
+        the source level-0 image exactly.
+    source_level:
+        Source multiscale level. Only ``0`` is accepted.
+    chunks:
+        Optional chunk shape override for the written label arrays.
+    dtype:
+        Optional integer dtype to cast ``data`` to before writing.
+    attrs:
+        Optional extra non-OME attributes to store on the label group.
+    colors:
+        Optional NGFF image-label color metadata.
+    properties:
+        Optional NGFF image-label properties metadata.
+    overwrite:
+        Whether to replace an existing label image with the same name.
+    threads:
+        Optional worker count for array writes.
+
+    Returns
+    -------
+    LabelWriteReport
+        Structured summary of the written label image.
+    """
     if str(source_level) != "0":
         raise ValueError("Label pyramids must be derived from source level 0 to remain NGFF-consistent")
 
@@ -142,7 +176,35 @@ def write_roi(
     overwrite: bool = False,
     threads: int | None = None,
 ) -> RoiWriteReport:
-    """Write a single-scale ROI cutout under ``rois/<name>/0``."""
+    """Write a single-scale ROI cutout under ``rois/<name>/0``.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle opened in a writable mode.
+    scene:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    name:
+        ROI name to create under the scene ``rois/`` group.
+    slices:
+        Mapping from axis name to a slice specification. Supported values are
+        ``slice`` objects, ``(start, stop)`` tuples, or integer indices.
+    source_level:
+        Source multiscale level used for the cutout.
+    chunks:
+        Optional chunk shape override for the written ROI array.
+    attrs:
+        Optional extra non-OME attributes to store on the ROI group.
+    overwrite:
+        Whether to replace an existing ROI with the same name.
+    threads:
+        Optional worker count for array writes.
+
+    Returns
+    -------
+    RoiWriteReport
+        Structured summary of the written ROI cutout.
+    """
     ref = require_writeable_scene(ds, scene)
     logger.info("Writing ROI %s for scene %s from source level %s", name, ref.id, source_level)
     _, multiscale, dataset_md = source_level_metadata(ds, ref.id, source_level)

@@ -12,7 +12,19 @@ from microio.common.logging_utils import setup_logging
 
 
 def _cmd_inspect(args) -> int:
-    """Run the inspection command and emit a JSON summary through logging."""
+    """Run the ``inspect`` command and emit a JSON summary through logging.
+
+    Parameters
+    ----------
+    args:
+        Parsed ``argparse`` namespace containing the input dataset path and
+        logging options.
+
+    Returns
+    -------
+    int
+        Process-style exit code. Returns ``0`` on success.
+    """
     logger = setup_logging(args.log_level)
     logger.info("Running inspect for %s", args.input)
     ds = open_dataset(args.input)
@@ -53,7 +65,19 @@ def _cmd_inspect(args) -> int:
 
 
 def _cmd_repair(args) -> int:
-    """Run table/axis validation and optional persistence for selected scenes."""
+    """Run table generation and axis repair for one or more scenes.
+
+    Parameters
+    ----------
+    args:
+        Parsed ``argparse`` namespace containing the input dataset path, the
+        selected scenes, persistence flags, and logging options.
+
+    Returns
+    -------
+    int
+        Process-style exit code. Returns ``0`` on success.
+    """
     logger = setup_logging(args.log_level)
     ds = open_dataset(args.input, mode="a" if args.persist or args.persist_table else "r")
     scene_ids = args.scene or ds.list_scenes()
@@ -89,7 +113,20 @@ def _cmd_repair(args) -> int:
 
 
 def _json_ready(value):
-    """Recursively convert dataclasses and mappings into JSON-ready values."""
+    """Recursively convert values into JSON-serializable Python containers.
+
+    Parameters
+    ----------
+    value:
+        Arbitrary Python value returned by microio accessors.
+
+    Returns
+    -------
+    object
+        A dataclass-free, mapping-free representation composed of plain Python
+        dictionaries, lists, tuples, and scalar values suitable for
+        :func:`json.dumps`.
+    """
     if is_dataclass(value):
         return {field.name: _json_ready(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, MappingProxyType):
@@ -102,7 +139,13 @@ def _json_ready(value):
 
 
 def main() -> int:
-    """Parse CLI arguments and dispatch to the selected subcommand."""
+    """Parse CLI arguments and dispatch to the selected subcommand.
+
+    Returns
+    -------
+    int
+        Process-style exit code returned by the selected command handler.
+    """
     parser = argparse.ArgumentParser(prog="microio")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

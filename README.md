@@ -1,43 +1,76 @@
-# microio library
-## Inspect and enrich bioformats2raw OME-Zarr microscopy data
+# microio
 
-`microio` is now a reader-first library for already-converted OME-Zarr datasets.
+`microio` is a reader-first microscopy I/O library for inspecting and enriching
+existing bioformats2raw-style OME-Zarr datasets on disk.
 
-Current scope:
-- open bioformats2raw-style OME-Zarr datasets
-- parse scene metadata from Zarr attrs and `OME/METADATA.ome.xml`
-- resolve scenes safely by id, dataset index, or unique name
-- inspect canonical scene mappings and multiscale level metadata
-- read specific multiscale levels as lazy Dask arrays with validation against Zarr metadata
-- validate multiscale axis metadata
-- build per-plane coordinate tables
-- safely repair placeholder `z` metadata when stronger XML evidence exists
-- write scene-local tables, NGFF-style label images, and single-scale ROI cutouts programmatically
+It focuses on safe access to scene metadata and image pyramids, plus a small
+set of write-side enrichments for data that already lives in a Zarr store.
 
-Out of scope:
-- proprietary LIF/VSI conversion
-- automatic `x/y` repair
-- automatic scalar `t` repair from ambiguous timing metadata
-- CLI-driven authoring of new write-side enrichments
+## Installation
 
-Basic reader usage:
+```bash
+pip install microio
+```
+
+## What It Does
+
+- Opens existing OME-Zarr datasets through `open_dataset()`
+- Resolves scenes by canonical id, dataset index, or unique scene name
+- Reads root, scene, multiscale, and OME-XML metadata
+- Validates multiscale axis metadata and level-to-array consistency
+- Exposes image levels as lazy Dask arrays, raw Zarr arrays, or eager NumPy arrays
+- Builds and loads per-plane coordinate tables from OME plane metadata
+- Repairs placeholder `z` metadata when stronger OME evidence exists
+- Writes scene-local tables, NGFF label images, and single-scale ROI cutouts
+
+## Safety Boundaries
+
+- `microio` operates on datasets that already exist on disk
+- It does not convert proprietary formats such as LIF or VSI into OME-Zarr
+- It does not invent `x` or `y` calibration
+- Scalar `t` repair is intentionally conservative and may remain unresolved
+- Name-based scene lookup is only accepted when a name is unique within the dataset
+- High-level image reads validate multiscale metadata before returning data
+
+## Quick Start
 
 ```python
 from microio import open_dataset
 
 ds = open_dataset("path/to/dataset.zarr")
 
-scene = ds.scene_ref(0)  # dataset index -> canonical scene ref
-levels = ds.list_levels(scene.id)
-array = ds.read_level(scene.id, 1)  # validated lazy Dask access to one pyramid level
-raw = ds.read_level_zarr(scene.id, 1)  # explicit raw Zarr access
-eager = ds.read_level_numpy(scene.id, 1)  # explicit NumPy materialization
+scene = ds.scene_ref(0)
+print(scene.id, scene.name)
 
-# Name lookup is allowed only when the name is unique.
-matches = ds.scene_name_matches("C555")
+root_md = ds.read_root_metadata()
+scene_md = ds.read_scene_metadata(scene.id)
+ome_scene = ds.read_scene_ome_metadata(scene.id)
+levels = ds.list_levels(scene.id)
+
+level1 = ds.read_level(scene.id, 1)
+level1_zarr = ds.read_level_zarr(scene.id, 1)
+level1_numpy = ds.read_level_numpy(scene.id, 1)
 ```
 
-Programmatic write-side enrichment:
+## Repair And Plane Tables
+
+```python
+from microio import open_dataset
+
+ds = open_dataset("path/to/dataset.zarr", mode="a")
+
+table, table_report = ds.ensure_plane_table("0")
+repair_report = ds.repair_axis_metadata("0", persist=True)
+
+print(table_report.row_count, table_report.persisted)
+print(repair_report.axis_states["z"])
+```
+
+`ensure_plane_table()` reuses a compatible stored table when possible and
+rebuilds it from OME plane metadata when needed. `repair_axis_metadata()`
+persists only accepted repairs and leaves unresolved metadata unchanged.
+
+## Limited Write-Side Enrichment
 
 ```python
 import numpy as np
@@ -45,30 +78,57 @@ import numpy as np
 from microio import open_dataset
 
 ds = open_dataset("path/to/dataset.zarr", mode="a")
+
 ds.write_table("0", "measurements", {"label_id": [1, 2], "volume": [10.5, 12.0]})
+
 ds.write_label_image(
     "0",
     "segmentation",
     np.zeros(ds.level_ref("0", 0).shape, dtype=np.uint16),
-    colors=[{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 1, "rgba": [0, 255, 0, 255]}],
+    colors=[
+        {"label-value": 0, "rgba": [0, 0, 0, 0]},
+        {"label-value": 1, "rgba": [0, 255, 0, 255]},
+    ],
 )
-ds.write_roi("0", "roi_1", {"t": (0, 2), "z": (0, 5), "y": (100, 300), "x": (200, 400)})
+
+ds.write_roi(
+    "0",
+    "roi_1",
+    {"t": (0, 2), "z": (0, 5), "y": (100, 300), "x": (200, 400)},
+)
 ```
 
 Notes:
-- pandas `DataFrame` input is supported for `write_table` when pandas is installed
-- write APIs are fail-safe by default and require `overwrite=True` to replace existing targets
-- `write_label_image` writes integer label pyramids that follow the source image pyramid and stores NGFF label metadata in either v2-style attrs or v3 `ome` attrs depending on the target store
-- `write_roi` remains a microio extension for single-scale cutouts with provenance metadata; it is intentionally not written as an NGFF label image
-- the CLI remains limited to inspection and repair flows
 
-Reader safety rules:
-- scene `id` means the actual Zarr child key, for example `"15"`
-- scene `index` means the zero-based dataset order returned by `list_scenes()`
-- scene names may be duplicated in real datasets; ambiguous name lookup raises an error
-- high-level image reads are lazy and Dask-first by default
-- level access validates metadata paths, scale vectors, axis order, and array dimensionality before returning data
+- `write_table()` also accepts pandas `DataFrame` input when pandas is installed
+- Write APIs are fail-safe by default and require `overwrite=True` to replace an existing target
+- `write_label_image()` writes integer label pyramids aligned to the source image pyramid
+- `write_roi()` is a microio extension for single-scale cutouts and is not stored as an NGFF label image
 
-*For more detailed documentation, please visit [DeepWiki](https://deepwiki.com/TStanC/microio) or look at the docstrings.*
+## CLI
 
-*Disclaimer: OpenAI's codex extension was heavily used to program this library*
+Inspect a dataset:
+
+```bash
+microio inspect --input path/to/dataset.zarr --log-level INFO
+```
+
+Repair scene metadata and optionally persist plane tables:
+
+```bash
+microio repair --input path/to/dataset.zarr --scene 0 --persist-table --persist --log-level DEBUG
+```
+
+## Main API Surface
+
+- `open_dataset(path, mode="r")`
+- `DatasetHandle.list_scene_refs()`, `list_scenes()`, `scene_ref()`
+- `DatasetHandle.read_root_metadata()`, `read_scene_metadata()`, `read_multiscale_metadata()`
+- `DatasetHandle.read_scene_ome_metadata()`, `read_original_metadata()`
+- `DatasetHandle.list_levels()`, `level_ref()`, `read_level()`, `read_level_zarr()`, `read_level_numpy()`
+- `DatasetHandle.validate_scene_data_flow()`
+- `DatasetHandle.build_plane_table()`, `ensure_plane_table()`, `load_plane_table()`
+- `DatasetHandle.inspect_axis_metadata()`, `repair_axis_metadata()`
+- `DatasetHandle.write_table()`, `write_label_image()`, `write_roi()`
+
+For implementation details, consult the package docstrings.

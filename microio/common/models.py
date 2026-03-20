@@ -41,7 +41,24 @@ class MultiscaleLevel:
 
 @dataclass(frozen=True)
 class SceneRef:
-    """Canonical scene identity inside one opened dataset."""
+    """Canonical scene identity inside one opened dataset.
+
+    Attributes
+    ----------
+    id:
+        Canonical Zarr child key for the scene.
+    index:
+        Zero-based scene position in stable dataset order.
+    name:
+        Human-readable scene name derived from multiscale metadata.
+    group_path:
+        Group path for the scene within the root Zarr store.
+    ome_index:
+        Matched OME image index when the sidecar OME-XML can be resolved
+        safely.
+    duplicate_name_count:
+        Number of scenes in the dataset that share ``name``.
+    """
 
     id: str
     index: int
@@ -53,7 +70,27 @@ class SceneRef:
 
 @dataclass(frozen=True)
 class LevelRef:
-    """Validated multiscale level description for one scene."""
+    """Validated multiscale level description for one scene.
+
+    Attributes
+    ----------
+    scene_id:
+        Canonical scene id that owns the level.
+    level_index:
+        Zero-based multiscale level index.
+    path:
+        Dataset path string from the multiscales metadata.
+    shape:
+        Array shape validated against the Zarr store.
+    dtype:
+        String form of the underlying array dtype.
+    scale:
+        Parsed coordinate scale vector for the level.
+    axis_names:
+        Axis order validated against the library contract.
+    axis_units:
+        Optional unit string for each axis.
+    """
 
     scene_id: str
     level_index: int
@@ -67,7 +104,11 @@ class LevelRef:
 
 @dataclass(frozen=True)
 class SceneOmeMetadata:
-    """Normalized scene metadata extracted from OME-XML."""
+    """Normalized scene metadata extracted from OME-XML.
+
+    This dataclass contains the subset of OME image metadata used for
+    validation, plane-table generation, and conservative axis repair.
+    """
 
     index: int
     name: str
@@ -156,39 +197,61 @@ class DataFlowReport:
 
 @dataclass(frozen=True)
 class SceneAccessor:
-    """Convenience wrapper for one resolved scene."""
+    """Convenience wrapper for one resolved scene.
+
+    The accessor keeps a resolved :class:`SceneRef` together with its parent
+    dataset handle and forwards common read operations to dataset-level APIs.
+    """
 
     dataset: "DatasetHandle"
     ref: SceneRef
 
     def metadata(self, *, corrected: bool = True) -> dict:
+        """Return scene attributes, optionally overlaying stored repairs."""
         return self.dataset.read_scene_metadata(self.ref.id, corrected=corrected)
 
     def multiscale_metadata(self) -> dict:
+        """Return the validated primary multiscales block for this scene."""
         return self.dataset.read_multiscale_metadata(self.ref.id)
 
     def ome_metadata(self) -> SceneOmeMetadata:
+        """Return normalized OME metadata for this scene."""
         return self.dataset.read_scene_ome_metadata(self.ref.id)
 
     def levels(self) -> list[LevelRef]:
+        """Return validated multiscale levels for this scene."""
         return self.dataset.list_levels(self.ref.id)
 
     def level(self, level: int | str = 0) -> LevelRef:
+        """Resolve one level by index or path for this scene."""
         return self.dataset.level_ref(self.ref.id, level)
 
     def array(self, level: int | str = 0):
+        """Return one level as a lazy Dask array."""
         return self.dataset.read_level(self.ref.id, level)
 
     def zarr_array(self, level: int | str = 0):
+        """Return one level as the underlying Zarr array."""
         return self.dataset.read_level_zarr(self.ref.id, level)
 
     def numpy_array(self, level: int | str = 0):
+        """Return one level eagerly materialized as a NumPy array."""
         return self.dataset.read_level_numpy(self.ref.id, level)
 
 
 @dataclass
 class DatasetHandle:
-    """Opened OME-Zarr dataset handle with enrichment helpers."""
+    """Opened OME-Zarr dataset handle with inspection and enrichment helpers.
+
+    Parameters
+    ----------
+    path:
+        Filesystem path to the opened dataset.
+    root:
+        Opened Zarr root group.
+    mode:
+        Zarr access mode used to open the dataset.
+    """
 
     path: Path
     root: Any
@@ -199,6 +262,7 @@ class DatasetHandle:
     _ome_document_cache: Any | None = field(default=None, init=False, repr=False)
 
     def invalidate_caches(self, scene_id: str | None = None) -> None:
+        """Invalidate cached scene, level, and metadata lookups."""
         self._scene_refs_cache = None
         if scene_id is None:
             self._level_refs_cache.clear()
@@ -208,125 +272,150 @@ class DatasetHandle:
             self._raw_scene_metadata_cache.pop(str(scene_id), None)
 
     def list_scene_refs(self) -> list[SceneRef]:
+        """Return canonical scene references in stable dataset order."""
         from microio.reader.metadata import list_scene_refs
 
         return list_scene_refs(self)
 
     def list_scenes(self) -> list[str]:
+        """Return canonical scene ids in stable dataset order."""
         from microio.reader.metadata import list_scenes
 
         return list_scenes(self)
 
     def scene_ref(self, scene: int | str) -> SceneRef:
+        """Resolve a scene by id, dataset index, or unique display name."""
         from microio.reader.metadata import scene_ref
 
         return scene_ref(self, scene)
 
     def get_scene(self, scene: int | str) -> SceneAccessor:
+        """Return a convenience accessor bound to one resolved scene."""
         ref = self.scene_ref(scene)
         return SceneAccessor(dataset=self, ref=ref)
 
     def classify_scene_reference(self, value: int | str) -> str:
+        """Classify a candidate scene selector without raising on misses."""
         from microio.reader.metadata import classify_scene_reference
 
         return classify_scene_reference(self, value)
 
     def is_scene_id(self, value: str) -> bool:
+        """Return whether ``value`` is a canonical scene id."""
         from microio.reader.metadata import is_scene_id
 
         return is_scene_id(self, value)
 
     def is_scene_index(self, value: int) -> bool:
+        """Return whether ``value`` is a valid dataset-order scene index."""
         from microio.reader.metadata import is_scene_index
 
         return is_scene_index(self, value)
 
     def scene_id_to_index(self, scene_id: str) -> int:
+        """Convert a canonical scene id into its dataset-order index."""
         from microio.reader.metadata import scene_id_to_index
 
         return scene_id_to_index(self, scene_id)
 
     def scene_index_to_id(self, index: int) -> str:
+        """Convert a dataset-order scene index into its canonical scene id."""
         from microio.reader.metadata import scene_index_to_id
 
         return scene_index_to_id(self, index)
 
     def scene_name_matches(self, name: str) -> list[SceneRef]:
+        """Return all scenes whose display name matches ``name`` exactly."""
         from microio.reader.metadata import scene_name_matches
 
         return scene_name_matches(self, name)
 
     def read_root_metadata(self) -> dict:
+        """Return root-group metadata as plain Python objects."""
         from microio.reader.metadata import root_metadata
 
         return root_metadata(self)
 
     def read_scene_metadata(self, scene: int | str, *, corrected: bool = True) -> dict:
+        """Return one scene's metadata, optionally overlaying stored repairs."""
         from microio.reader.metadata import scene_metadata
 
         return scene_metadata(self, scene, corrected=corrected)
 
     def read_multiscale_metadata(self, scene: int | str) -> dict:
+        """Return the validated primary multiscales block for one scene."""
         from microio.reader.metadata import multiscale_metadata
 
         return multiscale_metadata(self, scene)
 
     def read_ome_xml(self) -> str:
+        """Return the raw dataset-level sidecar OME-XML text."""
         from microio.reader.metadata import read_ome_xml
 
         return read_ome_xml(self)
 
     def read_scene_ome_metadata(self, scene: int | str) -> SceneOmeMetadata:
+        """Return normalized OME metadata for one scene."""
         from microio.reader.metadata import scene_ome_metadata
 
         return scene_ome_metadata(self, scene)
 
     def read_original_metadata(self) -> dict[str, str]:
+        """Return the OME ``OriginalMetadata`` key-value mapping."""
         from microio.reader.metadata import original_metadata
 
         return original_metadata(self)
 
     def list_levels(self, scene: int | str) -> list[LevelRef]:
+        """Return validated multiscale levels for one scene."""
         from microio.reader.metadata import list_levels
 
         return list_levels(self, scene)
 
     def level_ref(self, scene: int | str, level: int | str) -> LevelRef:
+        """Resolve one multiscale level by index or path."""
         from microio.reader.metadata import level_ref
 
         return level_ref(self, scene, level)
 
     def read_level(self, scene: int | str, level: int | str = 0):
+        """Return one image level as a lazy Dask array."""
         from microio.reader.metadata import read_level
 
         return read_level(self, scene, level)
 
     def read_level_zarr(self, scene: int | str, level: int | str = 0):
+        """Return one image level as the underlying Zarr array."""
         from microio.reader.metadata import read_level_zarr
 
         return read_level_zarr(self, scene, level)
 
     def read_level_numpy(self, scene: int | str, level: int | str = 0):
+        """Return one image level eagerly materialized as a NumPy array."""
         from microio.reader.metadata import read_level_numpy
 
         return read_level_numpy(self, scene, level)
 
     def validate_scene_data_flow(self, scene: int | str) -> DataFlowReport:
+        """Validate scene identity, multiscale metadata, and OME consistency."""
         from microio.reader.metadata import validate_scene_data_flow
 
         return validate_scene_data_flow(self, scene)
 
     def inspect_axis_metadata(self, scene: int | str) -> RepairReport:
+        """Inspect axis metadata for one scene without mutating the dataset."""
         from microio.reader.repair import inspect_axis_metadata
 
         return inspect_axis_metadata(self, scene)
 
     def repair_axis_metadata(self, scene: int | str, *, persist: bool = True) -> RepairReport:
+        """Repair trustworthy axis metadata for one scene."""
         from microio.reader.repair import repair_axis_metadata
 
         return repair_axis_metadata(self, scene, persist=persist)
 
     def load_plane_table(self, scene: int | str, table_name: str = "axes_trajectory") -> dict[str, Any]:
+        """Load a persisted plane table into eager NumPy columns."""
         from microio.reader.tables import load_plane_table
 
         return load_plane_table(self, scene, table_name=table_name)
@@ -338,6 +427,7 @@ class DatasetHandle:
         table_name: str = "axes_trajectory",
         persist: bool = False,
     ) -> tuple[dict[str, Any], PlaneTableReport]:
+        """Build a plane table from OME metadata, optionally persisting it."""
         from microio.reader.tables import build_plane_table
 
         return build_plane_table(self, scene, table_name=table_name, persist=persist)
@@ -349,16 +439,19 @@ class DatasetHandle:
         table_name: str = "axes_trajectory",
         rebuild: bool = False,
     ) -> tuple[dict[str, Any], PlaneTableReport]:
+        """Load a compatible plane table or rebuild it when required."""
         from microio.reader.tables import ensure_plane_table
 
         return ensure_plane_table(self, scene, table_name=table_name, rebuild=rebuild)
 
     def read_table_metadata(self, scene: int | str, table_name: str = "axes_trajectory") -> dict:
+        """Read stored metadata attrs for one scene-local table."""
         from microio.reader.tables import read_table_metadata
 
         return read_table_metadata(self, scene, table_name)
 
     def read_microio_extras(self, scene: int | str) -> dict:
+        """Read the stored ``microio`` extension block for one scene."""
         from microio.reader.extras import read_microio_extras
 
         return read_microio_extras(self, scene)
@@ -374,6 +467,7 @@ class DatasetHandle:
         append: bool = False,
         chunk_length: int | None = None,
     ) -> TableWriteReport:
+        """Write or append a scene-local table under ``tables/<name>``."""
         from microio.writer.tables import write_table
 
         return write_table(
@@ -402,6 +496,7 @@ class DatasetHandle:
         overwrite: bool = False,
         threads: int | None = None,
     ) -> LabelWriteReport:
+        """Write an NGFF-style label pyramid under ``labels/<name>``."""
         from microio.writer.images import write_label_image
 
         return write_label_image(
@@ -431,6 +526,7 @@ class DatasetHandle:
         overwrite: bool = False,
         threads: int | None = None,
     ) -> RoiWriteReport:
+        """Write a single-scale ROI cutout under ``rois/<name>/0``."""
         from microio.writer.images import write_roi
 
         return write_roi(

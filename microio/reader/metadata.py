@@ -16,7 +16,18 @@ from microio.reader.ome_xml import OmeDocument, parse_ome_xml
 logger = logging.getLogger("microio.reader.metadata")
 
 def list_scene_refs(ds) -> list[SceneRef]:
-    """Resolve all scenes in stable dataset order and cache the result."""
+    """Resolve all scenes in stable dataset order and cache the result.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+
+    Returns
+    -------
+    list[SceneRef]
+        Canonical scene references ordered by dataset order.
+    """
     cached = ds._scene_refs_cache
     if cached is not None:
         logger.debug("Using cached scene refs for %s", ds.path)
@@ -59,12 +70,42 @@ def list_scene_refs(ds) -> list[SceneRef]:
 
 
 def list_scenes(ds) -> list[str]:
-    """List scene ids in stable dataset order."""
+    """List canonical scene ids in stable dataset order.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+
+    Returns
+    -------
+    list[str]
+        Scene ids in the same order returned by :func:`list_scene_refs`.
+    """
     return [scene.id for scene in list_scene_refs(ds)]
 
 
 def scene_ref(ds, scene: int | str) -> SceneRef:
-    """Resolve one scene reference by id, dataset index, or unique name."""
+    """Resolve a scene reference by id, dataset index, or unique name.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene:
+        Scene selector. Integers are treated as dataset-order indexes. Strings
+        are matched against scene ids first and then unique scene names.
+
+    Returns
+    -------
+    SceneRef
+        Canonical scene reference.
+
+    Raises
+    ------
+    KeyError
+        If the scene cannot be resolved or if a name is ambiguous.
+    """
     refs = list_scene_refs(ds)
     if isinstance(scene, int):
         if 0 <= scene < len(refs):
@@ -88,7 +129,14 @@ def scene_ref(ds, scene: int | str) -> SceneRef:
 
 
 def classify_scene_reference(ds, value: int | str) -> str:
-    """Classify a candidate scene reference without raising on misses."""
+    """Classify a candidate scene reference without raising on misses.
+
+    Returns
+    -------
+    str
+        One of ``"index"``, ``"id"``, ``"name"``, ``"ambiguous_name"``, or
+        ``"unknown"``.
+    """
     if isinstance(value, int):
         return "index" if is_scene_index(ds, value) else "unknown"
 
@@ -125,18 +173,47 @@ def scene_index_to_id(ds, index: int) -> str:
 
 
 def scene_name_matches(ds, name: str) -> list[SceneRef]:
-    """Return all scenes whose display name equals ``name``."""
+    """Return all scenes whose display name equals ``name``.
+
+    Returns
+    -------
+    list[SceneRef]
+        Matching scene references. The list may contain multiple items when
+        names are duplicated in the dataset.
+    """
     name_text = str(name)
     return [ref for ref in list_scene_refs(ds) if ref.name == name_text]
 
 
 def root_metadata(ds) -> dict:
-    """Return root-group attributes as a plain dictionary."""
+    """Return root-group attributes as a plain dictionary.
+
+    Returns
+    -------
+    dict
+        Root-group attributes with any Zarr v3 ``ome`` namespace projected to
+        top-level semantic keys.
+    """
     return flattened_attrs(ds.root)
 
 
 def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
-    """Read one scene's attrs, optionally overlaying stored repairs."""
+    """Read one scene's attrs, optionally overlaying stored repairs.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene:
+        Scene selector accepted by :func:`scene_ref`.
+    corrected:
+        If ``True``, overlay persisted repair values onto the returned metadata.
+
+    Returns
+    -------
+    dict
+        Scene attributes as plain Python objects.
+    """
     ref = scene_ref(ds, scene)
     attrs = _raw_scene_metadata(ds, ref.id)
     if not corrected:
@@ -146,7 +223,18 @@ def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
 
 
 def multiscale_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
-    """Read and validate the primary multiscales block for one scene."""
+    """Read and validate the primary multiscales block for one scene.
+
+    Returns
+    -------
+    dict
+        Validated multiscale metadata block for the scene.
+
+    Raises
+    ------
+    ValueError
+        If the scene has missing or unsupported axis metadata.
+    """
     ref = scene_ref(ds, scene)
     attrs = scene_metadata(ds, ref.id, corrected=corrected)
     multiscales = attrs.get("multiscales")
@@ -158,7 +246,18 @@ def multiscale_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict
 
 
 def list_levels(ds, scene: int | str) -> list[LevelRef]:
-    """Enumerate and validate all multiscale levels for one scene."""
+    """Enumerate and validate all multiscale levels for one scene.
+
+    Returns
+    -------
+    list[LevelRef]
+        Validated level descriptors ordered from finest to coarsest.
+
+    Raises
+    ------
+    ValueError
+        If the Zarr arrays and multiscale metadata are inconsistent.
+    """
     ref = scene_ref(ds, scene)
     cached = ds._level_refs_cache.get(ref.id)
     if cached is not None:
@@ -213,7 +312,13 @@ def list_levels(ds, scene: int | str) -> list[LevelRef]:
 
 
 def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
-    """Resolve one level by index or path within a scene."""
+    """Resolve one level by index or path within a scene.
+
+    Raises
+    ------
+    KeyError
+        If the requested level index or path is unavailable.
+    """
     ref = scene_ref(ds, scene)
     levels = list_levels(ds, ref.id)
     if isinstance(level, int):
@@ -229,7 +334,13 @@ def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
 
 
 def read_level(ds, scene: int | str, level: int | str = 0):
-    """Read one image level as a Dask array."""
+    """Read one image level as a lazy Dask array.
+
+    Returns
+    -------
+    dask.array.Array
+        Lazy image data backed by the underlying Zarr array.
+    """
     return _wrap_zarr_as_dask(read_level_zarr(ds, scene, level))
 
 
@@ -241,12 +352,24 @@ def read_level_zarr(ds, scene: int | str, level: int | str = 0):
 
 
 def read_level_numpy(ds, scene: int | str, level: int | str = 0):
-    """Materialize one image level eagerly as a NumPy array."""
+    """Materialize one image level eagerly as a NumPy array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Fully materialized array data for the requested level.
+    """
     return read_level_zarr(ds, scene, level)[:]
 
 
 def read_ome_xml(ds) -> str:
-    """Read the dataset-level sidecar OME-XML text."""
+    """Read the dataset-level sidecar OME-XML text.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``OME/METADATA.ome.xml`` is missing.
+    """
     xml_path = _ome_xml_path(ds.path)
     if not xml_path.exists():
         raise FileNotFoundError(f"Missing OME sidecar XML: {xml_path}")
@@ -254,7 +377,20 @@ def read_ome_xml(ds) -> str:
 
 
 def scene_ome_metadata(ds, scene: int | str):
-    """Resolve normalized OME metadata for one scene."""
+    """Resolve normalized OME metadata for one scene.
+
+    Returns
+    -------
+    SceneOmeMetadata
+        Parsed scene metadata from the dataset sidecar OME-XML.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the OME sidecar is missing.
+    KeyError
+        If the scene cannot be matched safely to an OME image entry.
+    """
     ref = scene_ref(ds, scene)
     document = read_ome_document(ds)
     if ref.ome_index is not None and 0 <= ref.ome_index < len(document.scenes):
@@ -280,7 +416,14 @@ def original_metadata(ds) -> dict[str, str]:
 
 
 def validate_scene_data_flow(ds, scene: int | str) -> DataFlowReport:
-    """Validate scene identity, multiscale access, and OME/Zarr consistency."""
+    """Validate scene identity, multiscale access, and OME/Zarr consistency.
+
+    Returns
+    -------
+    DataFlowReport
+        Combined validation report for scene lookup, level access, and OME/Zarr
+        consistency checks.
+    """
     ref = scene_ref(ds, scene)
     logger.debug("Validating data flow for scene %s", ref.id)
     warnings: list[ValidationMessage] = []
@@ -349,6 +492,7 @@ def validate_scene_data_flow(ds, scene: int | str) -> DataFlowReport:
 
 
 def read_ome_document(ds) -> OmeDocument:
+    """Read and cache the parsed OME document for the current dataset."""
     if ds._ome_document_cache is None:
         logger.debug("Parsing OME-XML for %s", ds.path)
         ds._ome_document_cache = parse_ome_xml(_ome_xml_path(ds.path).read_text(encoding="utf-8", errors="replace"))

@@ -18,7 +18,21 @@ logger = logging.getLogger("microio.reader.repair")
 
 
 def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
-    """Validate one scene's multiscale axis metadata without mutating the store."""
+    """Inspect one scene's axis metadata without mutating the store.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene_id:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+
+    Returns
+    -------
+    RepairReport
+        Structured summary of the current axis state, including placeholder
+        detection, warnings, and validation errors.
+    """
     ref = ds.scene_ref(scene_id)
     logger.debug("Inspecting axis metadata for scene %s", ref.id)
     scene_md = scene_metadata(ds, ref.id, corrected=False)
@@ -88,7 +102,28 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
 
 
 def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> RepairReport:
-    """Safely repair scene-level t/z metadata when stronger evidence exists."""
+    """Repair scene-level ``t`` and ``z`` metadata when stronger evidence exists.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene_id:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    persist:
+        If ``True``, write accepted repairs back into the scene metadata.
+
+    Returns
+    -------
+    RepairReport
+        Final axis states and any warnings or errors generated during repair.
+
+    Notes
+    -----
+    ``x`` and ``y`` calibration are never invented. ``t`` repair remains
+    intentionally conservative and only succeeds when OME metadata provides a
+    trustworthy scalar increment.
+    """
     ref = ds.scene_ref(scene_id)
     logger.info("Repairing axis metadata for scene %s (persist=%s)", ref.id, persist)
     report = inspect_axis_metadata(ds, ref.id)

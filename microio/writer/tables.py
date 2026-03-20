@@ -27,7 +27,35 @@ def write_table(
     append: bool = False,
     chunk_length: int | None = None,
 ) -> TableWriteReport:
-    """Write or append one scene-local table under ``tables/<name>``."""
+    """Write or append one scene-local table under ``tables/<name>``.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle opened in a writable mode.
+    scene:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    name:
+        Table name to create under the scene ``tables/`` group.
+    data:
+        Table payload. Supported forms are a pandas ``DataFrame`` when pandas
+        is installed, a mapping of column names to one-dimensional arrays, a
+        list of row dictionaries with a consistent key order, or a flat scalar
+        sequence.
+    attrs:
+        Optional table-level metadata attributes to store on the Zarr group.
+    overwrite:
+        Whether to replace an existing table with the same name.
+    append:
+        Whether to append rows to an existing compatible table.
+    chunk_length:
+        Optional chunk length for the persisted column arrays.
+
+    Returns
+    -------
+    TableWriteReport
+        Structured summary of the created or appended table.
+    """
     ref = require_writeable_scene(ds, scene)
     logger.info(
         "Writing table %s for scene %s (append=%s overwrite=%s)",

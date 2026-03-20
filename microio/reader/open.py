@@ -14,7 +14,30 @@ logger = logging.getLogger("microio.reader.open")
 
 
 def open_dataset(path: str | Path, *, mode: str = "r") -> DatasetHandle:
-    """Open an existing OME-Zarr dataset."""
+    """Open an existing OME-Zarr dataset and return a dataset handle.
+
+    Parameters
+    ----------
+    path:
+        Filesystem path to an existing bioformats2raw-style OME-Zarr store.
+    mode:
+        Zarr access mode passed through to :func:`zarr.open`. Use ``"r"`` for
+        read-only inspection and ``"a"`` when persisting repairs, tables, or
+        other microio-managed enrichments.
+
+    Returns
+    -------
+    DatasetHandle
+        Handle exposing validated scene lookup, metadata access, image reads,
+        repair helpers, and limited write-side enrichment methods.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the requested path does not exist.
+    ValueError
+        If Zarr rejects the supplied mode or cannot interpret the store.
+    """
     dataset_path = Path(path)
     logger.info("Opening dataset %s with mode=%s", dataset_path, mode)
     root = zarr.open(dataset_path, mode=mode)

@@ -18,7 +18,22 @@ logger = logging.getLogger("microio.reader.tables")
 
 
 def load_plane_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict[str, np.ndarray]:
-    """Load one persisted plane table into eager NumPy column arrays."""
+    """Load one persisted plane table into eager NumPy column arrays.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene_id:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    table_name:
+        Name of the scene-local table under ``tables/``.
+
+    Returns
+    -------
+    dict[str, numpy.ndarray]
+        Mapping from column name to eager one-dimensional NumPy arrays.
+    """
     ref = ds.scene_ref(scene_id)
     logger.debug("Loading plane table %s for scene %s", table_name, ref.id)
     table = ds.root[ref.id]["tables"][table_name]
@@ -26,13 +41,36 @@ def load_plane_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_
 
 
 def read_table_metadata(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict:
-    """Read attrs for one persisted table."""
+    """Read metadata attributes for one persisted table.
+
+    Returns
+    -------
+    dict
+        Table attributes stored on the scene-local Zarr group.
+    """
     ref = ds.scene_ref(scene_id)
     return ds.root[ref.id]["tables"][table_name].attrs.asdict()
 
 
 def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, persist: bool = False):
-    """Build a per-plane trajectory table from OME-XML plane metadata."""
+    """Build a per-plane trajectory table from OME-XML plane metadata.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene_id:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    table_name:
+        Name to use under the scene ``tables/`` group when persisting.
+    persist:
+        If ``True``, store the generated table in the dataset.
+
+    Returns
+    -------
+    tuple[dict[str, numpy.ndarray], PlaneTableReport]
+        Generated table columns and the associated build report.
+    """
     ref = ds.scene_ref(scene_id)
     logger.info("Building plane table %s for scene %s (persist=%s)", table_name, ref.id, persist)
     ome_scene = scene_ome_metadata(ds, ref.id)
@@ -122,7 +160,24 @@ def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECT
 
 
 def ensure_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECTORY_TABLE_NAME, rebuild: bool = False):
-    """Load a compatible persisted plane table or rebuild it when needed."""
+    """Load a compatible persisted plane table or rebuild it when needed.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene_id:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    table_name:
+        Name of the scene-local table under ``tables/``.
+    rebuild:
+        If ``True``, ignore an existing compatible table and rebuild it.
+
+    Returns
+    -------
+    tuple[dict[str, numpy.ndarray], PlaneTableReport]
+        Loaded or generated table columns together with the action report.
+    """
     ref = ds.scene_ref(scene_id)
     scene = ds.root[ref.id]
     if not rebuild and "tables" in scene and table_name in scene["tables"]:
