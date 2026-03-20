@@ -9,7 +9,7 @@ set of write-side enrichments for data that already lives in a Zarr store.
 ## Installation
 
 ```bash
-pip install microio
+pip install git+https://github.com/TStanC/microio.git
 ```
 
 ## What It Does
@@ -131,4 +131,5 @@ microio repair --input path/to/dataset.zarr --scene 0 --persist-table --persist 
 - `DatasetHandle.inspect_axis_metadata()`, `repair_axis_metadata()`
 - `DatasetHandle.write_table()`, `write_label_image()`, `write_roi()`
 
-For implementation details, consult the package docstrings.
+For implementation details, consult the package docstrings or DeepWiki.
+This library was created with the help of OpenAIs CODEX agent.
