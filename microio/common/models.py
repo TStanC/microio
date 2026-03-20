@@ -9,7 +9,18 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ValidationMessage:
-    """Structured validation or repair diagnostic."""
+    """Structured validation or repair diagnostic.
+
+    Attributes
+    ----------
+    level:
+        Severity level such as ``"warning"`` or ``"error"``.
+    code:
+        Stable machine-readable code for programmatic checks in tests or CLI
+        consumers.
+    message:
+        Human-readable explanation of the condition.
+    """
 
     level: str
     code: str
@@ -18,7 +29,32 @@ class ValidationMessage:
 
 @dataclass(frozen=True)
 class AxisState:
-    """Resolved scene-axis state after multiscale inspection."""
+    """Resolved scene-axis state after multiscale inspection.
+
+    Attributes
+    ----------
+    axis:
+        Axis name from the supported ``("t", "c", "z", "y", "x")`` order.
+    value:
+        Scalar spacing value currently associated with the axis at level ``0``.
+    unit:
+        Normalized unit token such as ``"micrometer"`` or ``"second"``.
+    raw_unit:
+        Original unit token observed in the dataset before normalization.
+    source:
+        Provenance string describing where the value came from, for example
+        ``"zarr"``, ``"Pixels.PhysicalSizeZ"``, or ``"Plane.PositionZ"``.
+    placeholder:
+        Whether the current axis metadata looks like a placeholder that may
+        need repair.
+    repaired:
+        Whether the state reflects a microio repair decision rather than the
+        original stored metadata.
+    confidence:
+        Qualitative confidence label such as ``"high"`` or ``"medium"``.
+    warning_code:
+        Optional normalization warning code associated with ``unit``.
+    """
 
     axis: str
     value: float | None
@@ -33,7 +69,16 @@ class AxisState:
 
 @dataclass(frozen=True)
 class MultiscaleLevel:
-    """One multiscale level with the parsed scale vector."""
+    """One multiscale level with the parsed scale vector.
+
+    Attributes
+    ----------
+    path:
+        Relative array path from the scene group, for example ``"0"`` or
+        ``"1"``.
+    scale:
+        Parsed scale vector in dataset axis order.
+    """
 
     path: str
     scale: list[float]
@@ -108,6 +153,26 @@ class SceneOmeMetadata:
 
     This dataclass contains the subset of OME image metadata used for
     validation, plane-table generation, and conservative axis repair.
+
+    Attributes
+    ----------
+    index:
+        Image index within the parsed OME document.
+    name:
+        OME ``Image`` name.
+    size_t, size_c, size_z, size_y, size_x:
+        Pixel sizes from the OME ``Pixels`` element.
+    physical_size_x, physical_size_y, physical_size_z:
+        Optional scalar physical pixel sizes from OME.
+    physical_size_x_unit, physical_size_y_unit, physical_size_z_unit:
+        Raw OME unit tokens for the physical pixel sizes.
+    time_increment:
+        Optional scalar OME time increment.
+    time_increment_unit:
+        Raw OME unit token for ``time_increment``.
+    planes:
+        Per-plane metadata rows as parsed dictionaries containing fields such
+        as ``TheT``, ``TheC``, ``TheZ``, ``DeltaT``, and ``PositionZ``.
     """
 
     index: int
@@ -130,7 +195,21 @@ class SceneOmeMetadata:
 
 @dataclass
 class PlaneTableReport:
-    """Result of building or loading a plane table."""
+    """Result of building or loading a plane table.
+
+    Attributes
+    ----------
+    scene_id:
+        Canonical scene id that owns the table.
+    table_name:
+        Scene-local table name, usually ``"axes_trajectory"``.
+    row_count:
+        Number of rows in the loaded or generated table.
+    persisted:
+        Whether this call wrote a table into the dataset.
+    warnings:
+        Non-fatal diagnostics gathered while building or validating the table.
+    """
 
     scene_id: str
     table_name: str
@@ -141,7 +220,21 @@ class PlaneTableReport:
 
 @dataclass
 class RepairReport:
-    """Result of validating and optionally repairing one scene."""
+    """Result of validating and optionally repairing one scene.
+
+    Attributes
+    ----------
+    scene_id:
+        Canonical scene id that was inspected or repaired.
+    persisted:
+        Whether the call wrote any accepted repair back into the dataset.
+    axis_states:
+        Final per-axis state map keyed by axis name.
+    warnings:
+        Non-fatal diagnostics, including unresolved placeholder metadata.
+    errors:
+        Fatal validation issues that prevented repair.
+    """
 
     scene_id: str
     persisted: bool
@@ -201,13 +294,22 @@ class SceneAccessor:
 
     The accessor keeps a resolved :class:`SceneRef` together with its parent
     dataset handle and forwards common read operations to dataset-level APIs.
+    It is primarily ergonomic sugar over ``DatasetHandle`` when the scene
+    selector is already known.
     """
 
     dataset: "DatasetHandle"
     ref: SceneRef
 
     def metadata(self, *, corrected: bool = True) -> dict:
-        """Return scene attributes, optionally overlaying stored repairs."""
+        """Return scene attributes for this accessor's scene.
+
+        Parameters
+        ----------
+        corrected:
+            If ``True``, overlay persisted microio repairs onto the returned
+            semantic metadata view.
+        """
         return self.dataset.read_scene_metadata(self.ref.id, corrected=corrected)
 
     def multiscale_metadata(self) -> dict:
@@ -223,7 +325,13 @@ class SceneAccessor:
         return self.dataset.list_levels(self.ref.id)
 
     def level(self, level: int | str = 0) -> LevelRef:
-        """Resolve one level by index or path for this scene."""
+        """Resolve one level by index or path for this scene.
+
+        Examples
+        --------
+        ``scene.level(0)`` resolves the finest level, while
+        ``scene.level("1")`` resolves the level stored under path ``"1"``.
+        """
         return self.dataset.level_ref(self.ref.id, level)
 
     def array(self, level: int | str = 0):
@@ -235,7 +343,10 @@ class SceneAccessor:
         return self.dataset.read_level_zarr(self.ref.id, level)
 
     def numpy_array(self, level: int | str = 0):
-        """Return one level eagerly materialized as a NumPy array."""
+        """Return one level eagerly materialized as a NumPy array.
+
+        Unlike :meth:`array`, this reads the full level into memory.
+        """
         return self.dataset.read_level_numpy(self.ref.id, level)
 
 
@@ -250,7 +361,14 @@ class DatasetHandle:
     root:
         Opened Zarr root group.
     mode:
-        Zarr access mode used to open the dataset.
+        Zarr access mode used to open the dataset, usually ``"r"`` for
+        inspection or ``"a"`` for repair and writer operations.
+
+    Notes
+    -----
+    Most methods on this dataclass are thin forwarding wrappers around the
+    richer reader and writer modules. These wrappers exist so users can stay on
+    the dataset object once it has been opened.
     """
 
     path: Path
@@ -262,7 +380,15 @@ class DatasetHandle:
     _ome_document_cache: Any | None = field(default=None, init=False, repr=False)
 
     def invalidate_caches(self, scene_id: str | None = None) -> None:
-        """Invalidate cached scene, level, and metadata lookups."""
+        """Invalidate cached scene, level, and metadata lookups.
+
+        Parameters
+        ----------
+        scene_id:
+            Optional scene id whose scene-local caches should be cleared. When
+            omitted, all cached scene, level, and OME-backed metadata lookups
+            are invalidated.
+        """
         self._scene_refs_cache = None
         if scene_id is None:
             self._level_refs_cache.clear()
@@ -284,7 +410,14 @@ class DatasetHandle:
         return list_scenes(self)
 
     def scene_ref(self, scene: int | str) -> SceneRef:
-        """Resolve a scene by id, dataset index, or unique display name."""
+        """Resolve a scene by id, dataset index, or unique display name.
+
+        Examples
+        --------
+        ``ds.scene_ref(0)`` resolves the first scene in dataset order,
+        ``ds.scene_ref("0")`` resolves the canonical scene id, and
+        ``ds.scene_ref("C555")`` resolves a unique multiscale scene name.
+        """
         from microio.reader.metadata import scene_ref
 
         return scene_ref(self, scene)
@@ -337,7 +470,16 @@ class DatasetHandle:
         return root_metadata(self)
 
     def read_scene_metadata(self, scene: int | str, *, corrected: bool = True) -> dict:
-        """Return one scene's metadata, optionally overlaying stored repairs."""
+        """Return one scene's semantic metadata view.
+
+        Parameters
+        ----------
+        scene:
+            Scene selector accepted by :meth:`scene_ref`.
+        corrected:
+            If ``True``, apply persisted microio repairs before returning the
+            metadata.
+        """
         from microio.reader.metadata import scene_metadata
 
         return scene_metadata(self, scene, corrected=corrected)
@@ -355,7 +497,11 @@ class DatasetHandle:
         return read_ome_xml(self)
 
     def read_scene_ome_metadata(self, scene: int | str) -> SceneOmeMetadata:
-        """Return normalized OME metadata for one scene."""
+        """Return normalized OME metadata for one scene.
+
+        This is the parsed OME view, not the raw semantic scene attrs returned
+        by :meth:`read_scene_metadata`.
+        """
         from microio.reader.metadata import scene_ome_metadata
 
         return scene_ome_metadata(self, scene)
@@ -379,7 +525,11 @@ class DatasetHandle:
         return level_ref(self, scene, level)
 
     def read_level(self, scene: int | str, level: int | str = 0):
-        """Return one image level as a lazy Dask array."""
+        """Return one image level as a lazy Dask array.
+
+        Use this method when downstream computation can stay lazy. For eager
+        reads, use :meth:`read_level_numpy`.
+        """
         from microio.reader.metadata import read_level
 
         return read_level(self, scene, level)
@@ -409,13 +559,26 @@ class DatasetHandle:
         return inspect_axis_metadata(self, scene)
 
     def repair_axis_metadata(self, scene: int | str, *, persist: bool = True) -> RepairReport:
-        """Repair trustworthy axis metadata for one scene."""
+        """Repair trustworthy axis and channel-window metadata for one scene.
+
+        Parameters
+        ----------
+        scene:
+            Scene selector accepted by :meth:`scene_ref`.
+        persist:
+            If ``True``, accepted repairs are written back into the dataset.
+            The handle must have been opened in append mode.
+        """
         from microio.reader.repair import repair_axis_metadata
 
         return repair_axis_metadata(self, scene, persist=persist)
 
     def load_plane_table(self, scene: int | str, table_name: str = "axes_trajectory") -> dict[str, Any]:
-        """Load a persisted plane table into eager NumPy columns."""
+        """Load a persisted plane table into eager NumPy columns.
+
+        The default table stores one row per ``(t, c, z)`` plane with columns
+        such as ``the_t``, ``the_c``, ``the_z``, and ``positioners_z``.
+        """
         from microio.reader.tables import load_plane_table
 
         return load_plane_table(self, scene, table_name=table_name)
@@ -467,7 +630,13 @@ class DatasetHandle:
         append: bool = False,
         chunk_length: int | None = None,
     ) -> TableWriteReport:
-        """Write or append a scene-local table under ``tables/<name>``."""
+        """Write or append a scene-local table under ``tables/<name>``.
+
+        The ``data`` argument accepts the same forms as
+        :func:`microio.writer.tables.write_table`, including mappings of
+        columns, row records, flat scalar sequences, and pandas DataFrames when
+        pandas is installed.
+        """
         from microio.writer.tables import write_table
 
         return write_table(
@@ -496,7 +665,12 @@ class DatasetHandle:
         overwrite: bool = False,
         threads: int | None = None,
     ) -> LabelWriteReport:
-        """Write an NGFF-style label pyramid under ``labels/<name>``."""
+        """Write an NGFF-style label pyramid under ``labels/<name>``.
+
+        This method expects a level-0 label image whose shape matches the
+        source scene exactly. It then derives any coarser levels from the
+        source pyramid metadata.
+        """
         from microio.writer.images import write_label_image
 
         return write_label_image(
@@ -526,7 +700,12 @@ class DatasetHandle:
         overwrite: bool = False,
         threads: int | None = None,
     ) -> RoiWriteReport:
-        """Write a single-scale ROI cutout under ``rois/<name>/0``."""
+        """Write a single-scale ROI cutout under ``rois/<name>/0``.
+
+        The ``slices`` mapping uses axis names such as ``"t"``, ``"z"``,
+        ``"y"``, and ``"x"`` with either integer indices or ``(start, stop)``
+        tuples.
+        """
         from microio.writer.images import write_roi
 
         return write_roi(

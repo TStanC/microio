@@ -32,7 +32,10 @@ def load_plane_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_
     Returns
     -------
     dict[str, numpy.ndarray]
-        Mapping from column name to eager one-dimensional NumPy arrays.
+        Mapping from column name to eager one-dimensional NumPy arrays. The
+        default table includes ``the_t``, ``the_c``, ``the_z``,
+        ``positioners_t``, ``positioners_z``, ``positioners_y``, and
+        ``positioners_x``.
     """
     ref = ds.scene_ref(scene_id)
     logger.debug("Loading plane table %s for scene %s", table_name, ref.id)
@@ -42,6 +45,15 @@ def load_plane_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_
 
 def read_table_metadata(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict:
     """Read metadata attributes for one persisted table.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene_id:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+    table_name:
+        Name of the scene-local table under ``tables/``.
 
     Returns
     -------
@@ -64,12 +76,20 @@ def build_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJECT
     table_name:
         Name to use under the scene ``tables/`` group when persisting.
     persist:
-        If ``True``, store the generated table in the dataset.
+        If ``True``, store the generated table in the dataset. Existing tables
+        with the same name are replaced.
 
     Returns
     -------
     tuple[dict[str, numpy.ndarray], PlaneTableReport]
-        Generated table columns and the associated build report.
+        Generated table columns and the associated build report. Rows are
+        ordered by the flattened ``(t, c, z)`` traversal used by
+        :func:`_flat_index`.
+
+    Notes
+    -----
+    Missing plane values are represented as ``NaN`` in the floating-point
+    positioner columns instead of removing rows.
     """
     ref = ds.scene_ref(scene_id)
     logger.info("Building plane table %s for scene %s (persist=%s)", table_name, ref.id, persist)
@@ -177,6 +197,11 @@ def ensure_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJEC
     -------
     tuple[dict[str, numpy.ndarray], PlaneTableReport]
         Loaded or generated table columns together with the action report.
+
+    Notes
+    -----
+    Compatibility is currently defined by ``schema_version``. A matching stored
+    table is reused unless ``rebuild=True`` is requested.
     """
     ref = ds.scene_ref(scene_id)
     scene = ds.root[ref.id]
@@ -195,7 +220,12 @@ def ensure_plane_table(ds, scene_id: int | str, *, table_name: str = AXES_TRAJEC
 
 
 def _persist_table(ds, scene_id: str, table_name: str, data: dict[str, np.ndarray], ome_scene, warnings: list[ValidationMessage]) -> None:
-    """Persist a normalized plane table into the scene ``tables`` group."""
+    """Persist a normalized plane table into the scene ``tables`` group.
+
+    The stored attrs include schema information, the source ``(t, c, z)``
+    shape, validation warnings, and summarized unit metadata for the positioner
+    columns.
+    """
     scene = ds.root[scene_id]
     tables = scene.require_group("tables")
     if table_name in tables:

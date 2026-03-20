@@ -15,7 +15,12 @@ logger = logging.getLogger("microio.reader.fixtures")
 
 
 def clone_scene_subset(source: str | Path, destination: str | Path, scene_ids: list[str]) -> Path:
-    """Copy a subset of scenes into a new scratch dataset without touching the source."""
+    """Copy a subset of scenes into a new scratch dataset without touching the source.
+
+    Mutable metadata files are copied, while immutable image payload
+    directories may be shared through hardlinks or Windows directory junctions
+    to keep fixture setup fast.
+    """
     source_path = Path(source)
     destination_path = Path(destination)
     logger.debug(
@@ -83,7 +88,10 @@ def _should_copy_metadata_file(name: str) -> bool:
 
 
 def _should_junction_directory(path: Path) -> bool:
-    """Return whether a directory can be safely shared as immutable payload."""
+    """Return whether a directory can be safely shared as immutable payload.
+
+    Scene-local ``tables`` data is always cloned so tests can mutate it safely.
+    """
     name = path.name
     if name == "tables":
         return False
@@ -110,7 +118,11 @@ def _link_or_copy(source: Path, destination: Path) -> None:
 
 
 def _create_directory_junction(source: Path, destination: Path) -> None:
-    """Create a Windows directory junction for an immutable subtree."""
+    """Create a Windows directory junction for an immutable subtree.
+
+    This helper is test-only and intentionally Windows-specific because the
+    sandbox fixture workflow relies on NTFS directory junctions.
+    """
     if destination.exists():
         raise FileExistsError(f"Destination already exists: {destination}")
     if sys.platform != "win32":

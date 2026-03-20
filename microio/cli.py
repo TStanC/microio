@@ -24,6 +24,11 @@ def _cmd_inspect(args) -> int:
     -------
     int
         Process-style exit code. Returns ``0`` on success.
+
+    Notes
+    -----
+    The command logs a JSON payload containing root metadata, scene references,
+    validated level metadata, and scene-level data-flow diagnostics.
     """
     logger = setup_logging(args.log_level)
     logger.info("Running inspect for %s", args.input)
@@ -77,6 +82,13 @@ def _cmd_repair(args) -> int:
     -------
     int
         Process-style exit code. Returns ``0`` on success.
+
+    Notes
+    -----
+    The dataset is opened in append mode only when ``--persist`` or
+    ``--persist-table`` is requested. The logged JSON payload includes both the
+    plane-table action report and the scene-repair report for each selected
+    scene.
     """
     logger = setup_logging(args.log_level)
     ds = open_dataset(args.input, mode="a" if args.persist or args.persist_table else "r")
@@ -126,6 +138,11 @@ def _json_ready(value):
         A dataclass-free, mapping-free representation composed of plain Python
         dictionaries, lists, tuples, and scalar values suitable for
         :func:`json.dumps`.
+
+    Notes
+    -----
+    The helper is intentionally recursive so nested dataclasses such as
+    ``RepairReport`` and ``ValidationMessage`` can be logged directly.
     """
     if is_dataclass(value):
         return {field.name: _json_ready(getattr(value, field.name)) for field in fields(value)}

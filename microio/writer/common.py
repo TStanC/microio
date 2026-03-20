@@ -22,7 +22,12 @@ logger = logging.getLogger("microio.writer.common")
 
 
 def require_writeable_scene(ds, scene: int | str):
-    """Resolve one writable scene and reject unsupported scene layouts."""
+    """Resolve one writable scene and reject unsupported scene layouts.
+
+    This helper combines the generic writable-handle guard with scene
+    resolution and a writer-specific validation that only image levels plus the
+    supported microio child groups are present.
+    """
     require_writable(ds)
     ref = scene_ref(ds, scene)
     logger.debug("Resolved writable scene %s", ref.id)
@@ -46,7 +51,11 @@ def _validate_scene_children(ds, scene_id: str) -> None:
 
 
 def source_level_metadata(ds, scene: int | str, source_level: int | str) -> tuple[Any, dict, Any]:
-    """Load source-level metadata used to seed label and ROI writes."""
+    """Load source-level metadata used to seed label and ROI writes.
+
+    Returns the resolved scene reference, a deep-copied semantic multiscales
+    block, and the dataset metadata entry corresponding to ``source_level``.
+    """
     ref = scene_ref(ds, scene)
     level = level_ref(ds, ref.id, source_level)
     ms = deepcopy(multiscale_metadata(ds, ref.id))
@@ -56,7 +65,11 @@ def source_level_metadata(ds, scene: int | str, source_level: int | str) -> tupl
 
 
 def source_pyramid_metadata(ds, scene: int | str) -> tuple[Any, dict, list[Any]]:
-    """Load source-scene metadata used to seed full label pyramids."""
+    """Load source-scene metadata used to seed full label pyramids.
+
+    The returned dataset metadata list is deep-copied so callers can rewrite
+    paths or names without mutating the source scene metadata in memory.
+    """
     ref = scene_ref(ds, scene)
     ms = deepcopy(multiscale_metadata(ds, ref.id))
     datasets = [deepcopy(item) for item in ms["datasets"]]
@@ -65,7 +78,12 @@ def source_pyramid_metadata(ds, scene: int | str) -> tuple[Any, dict, list[Any]]
 
 
 def default_chunks(shape: tuple[int, ...], dtype: np.dtype, chunks: tuple[int, ...] | None) -> tuple[int, ...]:
-    """Choose a conservative chunk layout for newly written arrays."""
+    """Choose a conservative chunk layout for newly written arrays.
+
+    When ``chunks`` is not supplied, the helper shrinks the largest axes until
+    the estimated chunk payload is close to 8 MiB while preserving the input
+    dimensionality.
+    """
     if chunks is not None:
         return tuple(int(max(1, min(dim, chunk))) for dim, chunk in zip(shape, chunks, strict=True))
     itemsize = max(1, int(dtype.itemsize))
@@ -100,7 +118,12 @@ def require_child_group(parent, name: str):
 
 
 def coerce_array(data: Any):
-    """Normalize array-like input into Dask or NumPy form."""
+    """Normalize array-like input into Dask or NumPy form.
+
+    Dask arrays are preserved. Zarr-like or NumPy-like inputs are wrapped as
+    Dask arrays when possible; otherwise they are coerced eagerly with
+    :func:`numpy.asarray`.
+    """
     if isinstance(data, da.Array):
         return data
     if hasattr(data, "shape") and hasattr(data, "dtype") and hasattr(data, "__getitem__"):
@@ -112,7 +135,11 @@ def coerce_array(data: Any):
 
 
 def maybe_cast_array(data: Any, dtype: Any | None):
-    """Apply a dtype cast only when explicitly requested and value-safe."""
+    """Apply a dtype cast only when explicitly requested and value-safe.
+
+    NumPy-backed inputs are round-tripped through the original dtype to confirm
+    that casting does not change values.
+    """
     if dtype is None:
         return data
     if isinstance(data, da.Array):
@@ -135,7 +162,12 @@ def write_array(
     threads: int | None = None,
     dimension_names: tuple[str, ...] | None = None,
 ):
-    """Persist one array using either Dask or NumPy-backed write paths."""
+    """Persist one array using either Dask or NumPy-backed write paths.
+
+    Dask-backed arrays are rechunked to the requested chunk layout and stored
+    with threaded Dask execution. NumPy-backed arrays use direct assignment and
+    can optionally be written in chunks along axis ``0``.
+    """
     dtype = np.dtype(data.dtype) if hasattr(data, "dtype") else np.asarray(data).dtype
     target = group.create_array(
         name,
@@ -171,7 +203,11 @@ def write_array(
 
 
 def normalize_slice_spec(spec: Any) -> slice | int:
-    """Accept the ROI slice forms supported by the public writer API."""
+    """Accept the ROI slice forms supported by the public writer API.
+
+    Supported forms are plain ``slice`` objects, ``(start, stop)`` tuples, and
+    integer indices.
+    """
     if isinstance(spec, slice):
         return spec
     if isinstance(spec, tuple) and len(spec) == 2:
@@ -182,7 +218,11 @@ def normalize_slice_spec(spec: Any) -> slice | int:
 
 
 def replace_node_ome_metadata(node, ome: dict[str, Any], *, extra_attrs: dict[str, Any] | None = None) -> None:
-    """Persist semantic OME metadata in a format-compatible attrs layout."""
+    """Persist semantic OME metadata in a format-compatible attrs layout.
+
+    Existing non-OME attrs on ``node`` are preserved unless an overriding value
+    is supplied in ``extra_attrs``.
+    """
     merged_extra = non_ome_attrs(node)
     if extra_attrs:
         merged_extra.update(deepcopy(extra_attrs))

@@ -63,7 +63,9 @@ def write_label_image(
         Label image name to create under the scene ``labels/`` group.
     data:
         Integer-valued label image for source level ``0``. The shape must match
-        the source level-0 image exactly.
+        the source level-0 image exactly. The library expects the dataset axis
+        order ``("t", "c", "z", "y", "x")`` and therefore expects the label
+        data to follow that same order.
     source_level:
         Source multiscale level. Only ``0`` is accepted.
     chunks:
@@ -71,11 +73,14 @@ def write_label_image(
     dtype:
         Optional integer dtype to cast ``data`` to before writing.
     attrs:
-        Optional extra non-OME attributes to store on the label group.
+        Optional extra non-OME attributes to store on the label group, for
+        example ``{"description": "nucleus segmentation"}``.
     colors:
-        Optional NGFF image-label color metadata.
+        Optional NGFF image-label color metadata, for example
+        ``[{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 7, "rgba": [255, 255, 0, 255]}]``.
     properties:
-        Optional NGFF image-label properties metadata.
+        Optional NGFF image-label properties metadata, for example
+        ``[{"label-value": 7, "class": "nucleus"}]``.
     overwrite:
         Whether to replace an existing label image with the same name.
     threads:
@@ -85,6 +90,12 @@ def write_label_image(
     -------
     LabelWriteReport
         Structured summary of the written label image.
+
+    Notes
+    -----
+    The function writes the level-0 label image directly and derives coarser
+    label levels from the source image pyramid metadata. Existing targets are
+    preserved unless ``overwrite=True`` is supplied.
     """
     if str(source_level) != "0":
         raise ValueError("Label pyramids must be derived from source level 0 to remain NGFF-consistent")
@@ -189,6 +200,7 @@ def write_roi(
     slices:
         Mapping from axis name to a slice specification. Supported values are
         ``slice`` objects, ``(start, stop)`` tuples, or integer indices.
+        Example: ``{"t": 0, "z": (0, 4), "y": (100, 300), "x": (200, 400)}``.
     source_level:
         Source multiscale level used for the cutout.
     chunks:
@@ -204,6 +216,11 @@ def write_roi(
     -------
     RoiWriteReport
         Structured summary of the written ROI cutout.
+
+    Notes
+    -----
+    Integer axis selectors are normalized to length-1 slices so the ROI keeps
+    the original axis count instead of squeezing dimensions away.
     """
     ref = require_writeable_scene(ds, scene)
     logger.info("Writing ROI %s for scene %s from source level %s", name, ref.id, source_level)
@@ -251,7 +268,12 @@ def _label_group_ome_metadata(
     colors: list[dict[str, Any]] | None,
     properties: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Build semantic OME metadata for a label image group."""
+    """Build semantic OME metadata for a label image group.
+
+    Returns a semantic metadata dictionary containing ``multiscales`` and
+    ``image-label`` blocks ready to be serialized through the shared NGFF
+    helpers.
+    """
     label_md = {
         "source": {"image": "../../"},
         "version": _image_label_version(multiscale),
@@ -311,7 +333,11 @@ def _roi_extra_attrs(
 
 
 def _single_scale_multiscale(multiscale: dict[str, Any], dataset_md: dict[str, Any], name: str) -> dict[str, Any]:
-    """Build a single-scale multiscales block derived from one source level."""
+    """Build a single-scale multiscales block derived from one source level.
+
+    The output mirrors the source scene's axis metadata while rewriting the
+    dataset path to ``"0"`` for the ROI-local image.
+    """
     axes = deepcopy(multiscale["axes"])
     dataset = deepcopy(dataset_md)
     dataset["path"] = "0"
@@ -332,7 +358,11 @@ def _single_scale_multiscale(multiscale: dict[str, Any], dataset_md: dict[str, A
 
 
 def _pyramid_multiscale(multiscale: dict[str, Any], source_datasets: list[dict[str, Any]], name: str) -> dict[str, Any]:
-    """Build a multiscales block for a derived label pyramid."""
+    """Build a multiscales block for a derived label pyramid.
+
+    This preserves source-scene metadata fields such as ``metadata`` and
+    ``type`` while rewriting the multiscale ``name``.
+    """
     datasets = [deepcopy(item) for item in source_datasets]
     out = {
         "axes": deepcopy(multiscale["axes"]),
@@ -359,7 +389,11 @@ def _updated_label_listing(labels_group, name: str) -> list[str]:
 
 
 def _normalize_roi_slices(shape: tuple[int, ...], axes: list[str], slices: dict[str, Any]) -> tuple[tuple[Any, ...], dict[str, Any]]:
-    """Normalize ROI slice specs and capture provenance in source coordinates."""
+    """Normalize ROI slice specs and capture provenance in source coordinates.
+
+    The returned provenance dictionary is later stored under the microio ROI
+    extension block so consumers can reconstruct the source-space crop.
+    """
     normalized: list[Any] = []
     provenance: dict[str, Any] = {}
     for axis, size in zip(axes, shape, strict=True):
@@ -388,7 +422,11 @@ def _origin_from_provenance(provenance: dict[str, Any]) -> dict[str, int]:
 
 
 def _resample_label_level(data: Any, target_shape: tuple[int, ...]):
-    """Nearest-neighbor downsample a label image to a target multiscale shape."""
+    """Nearest-neighbor downsample a label image to a target multiscale shape.
+
+    Label data is resampled with index-based nearest-neighbor selection to
+    avoid introducing fractional or blended label ids.
+    """
     current_shape = tuple(int(dim) for dim in data.shape)
     if current_shape == target_shape:
         return data
@@ -408,7 +446,11 @@ def _resample_label_level(data: Any, target_shape: tuple[int, ...]):
 
 
 def _normalize_label_colors(colors: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """Validate image-label color metadata."""
+    """Validate image-label color metadata.
+
+    Each entry must define ``label-value`` and may optionally define ``rgba``
+    as four integers in the inclusive range ``0..255``.
+    """
     if colors is None:
         return None
     if not isinstance(colors, list):
@@ -441,7 +483,11 @@ def _normalize_label_colors(colors: list[dict[str, Any]] | None) -> list[dict[st
 
 
 def _normalize_label_properties(properties: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """Validate image-label property metadata."""
+    """Validate image-label property metadata.
+
+    Each entry must define ``label-value`` and may carry any additional
+    JSON-serializable label annotation fields.
+    """
     if properties is None:
         return None
     if not isinstance(properties, list):
