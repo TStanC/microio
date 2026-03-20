@@ -96,6 +96,10 @@ def scene_ref(ds, scene: int | str) -> SceneRef:
         Scene selector. Integers are treated as dataset-order indexes. Strings
         are matched against scene ids first and then unique scene names.
 
+        Examples: ``0`` resolves the first scene in dataset order, ``"0"``
+        resolves the canonical scene id, and ``"C555"`` resolves a unique
+        multiscale scene name.
+
     Returns
     -------
     SceneRef
@@ -208,6 +212,9 @@ def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
         Scene selector accepted by :func:`scene_ref`.
     corrected:
         If ``True``, overlay persisted repair values onto the returned metadata.
+        For example, a stored ``microio.repair.repaired_axes.z`` value is
+        projected back onto the returned ``multiscales[0].datasets[*].scale``
+        vectors.
 
     Returns
     -------
@@ -224,6 +231,26 @@ def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
 
 def multiscale_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
     """Read and validate the primary multiscales block for one scene.
+
+    The returned dictionary follows the semantic NGFF shape used throughout the
+    library, for example::
+
+        {
+            "name": "scene",
+            "axes": [
+                {"name": "t", "type": "time"},
+                {"name": "c", "type": "channel"},
+                {"name": "z", "type": "space", "unit": "micrometer"},
+                {"name": "y", "type": "space", "unit": "micrometer"},
+                {"name": "x", "type": "space", "unit": "micrometer"},
+            ],
+            "datasets": [
+                {
+                    "path": "0",
+                    "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 0.5, 0.5, 0.5]}],
+                }
+            ],
+        }
 
     Returns
     -------

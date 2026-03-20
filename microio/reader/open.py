@@ -25,6 +25,10 @@ def open_dataset(path: str | Path, *, mode: str = "r") -> DatasetHandle:
         read-only inspection and ``"a"`` when persisting repairs, tables, or
         other microio-managed enrichments.
 
+        Example: ``open_dataset("sample.zarr", mode="a")`` is required before
+        calling :meth:`DatasetHandle.repair_axis_metadata` with
+        ``persist=True``.
+
     Returns
     -------
     DatasetHandle
@@ -37,6 +41,13 @@ def open_dataset(path: str | Path, *, mode: str = "r") -> DatasetHandle:
         If the requested path does not exist.
     ValueError
         If Zarr rejects the supplied mode or cannot interpret the store.
+
+    Examples
+    --------
+    >>> ds = open_dataset("plate.zarr")
+    >>> ds.list_scenes()
+    ['0']
+    >>> writable = open_dataset("plate.zarr", mode="a")
     """
     dataset_path = Path(path)
     logger.info("Opening dataset %s with mode=%s", dataset_path, mode)

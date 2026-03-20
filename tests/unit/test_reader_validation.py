@@ -11,7 +11,7 @@ from microio.reader.open import open_dataset
 def test_lif_scenes_do_not_auto_repair_t(lif_subset):
     ds = open_dataset(lif_subset, mode="a")
     repair = ds.repair_axis_metadata("14", persist=True)
-    assert repair.persisted is False
+    assert repair.persisted is True
     assert any(message.code in {"t_not_repaired", "t_unresolved"} for message in repair.warnings)
     assert repair.axis_states["t"].placeholder is True
 
@@ -84,10 +84,10 @@ def test_no_t_scalar_repair_from_lif_delta_t(lif_subset):
     ds = open_dataset(lif_subset, mode="a")
     repair = ds.repair_axis_metadata("15", persist=True)
     assert repair.axis_states["t"].repaired is False
-    assert repair.persisted is False
+    assert repair.persisted is True
 
 
-def test_missing_ome_xml_disables_repair(vsi_subset):
+def test_missing_ome_xml_disables_axis_repair_but_allows_window_repair(vsi_subset):
     xml_path = vsi_subset / "OME" / "METADATA.ome.xml"
     xml_path.unlink()
 
@@ -96,4 +96,6 @@ def test_missing_ome_xml_disables_repair(vsi_subset):
     repaired = ds.repair_axis_metadata("0", persist=True)
 
     assert any(message.code == "ome_xml_missing" for message in report.warnings)
-    assert repaired.persisted is False
+    assert repaired.axis_states["z"].repaired is False
+    assert repaired.persisted is True
+    assert ds.read_scene_metadata("0", corrected=False)["omero"]["channels"][0]["window"]["max"] == 65535.0

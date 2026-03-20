@@ -41,9 +41,11 @@ def write_table(
         Table payload. Supported forms are a pandas ``DataFrame`` when pandas
         is installed, a mapping of column names to one-dimensional arrays, a
         list of row dictionaries with a consistent key order, or a flat scalar
-        sequence.
+        sequence. Examples include ``{"label_id": [1, 2], "area": [10.5, 12.0]}``
+        and ``[{"t": 0, "z": 4}, {"t": 1, "z": 5}]``.
     attrs:
-        Optional table-level metadata attributes to store on the Zarr group.
+        Optional table-level metadata attributes to store on the Zarr group,
+        for example ``{"description": "derived spot measurements"}``.
     overwrite:
         Whether to replace an existing table with the same name.
     append:

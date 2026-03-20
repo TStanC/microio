@@ -31,7 +31,8 @@ def setup_logging(level: str | int = "INFO") -> logging.Logger:
         as ``"DEBUG"``, ``"INFO"``, ``"WARNING"``, ``"ERROR"``, and
         ``"CRITICAL"``, common aliases such as ``"WARN"`` and ``"FATAL"``,
         and integer logging levels accepted by :mod:`logging`. Unknown values
-        fall back to ``INFO``.
+        fall back to ``INFO``. Example: ``setup_logging("WARN")`` configures
+        the package logger at :data:`logging.WARNING`.
 
     Returns
     -------

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from itertools import product
 import logging
 import math
 import statistics
+
+import numpy as np
 
 from microio.common.constants import AXES_ORDER, MICROIO_SCHEMA_VERSION
 from microio.common.mutations import require_writable, write_scene_attrs
@@ -93,7 +96,7 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
             ValidationMessage(
                 level="warning",
                 code="ome_xml_missing",
-                message=f"Scene {ref.id} cannot be repaired because OME/METADATA.ome.xml is missing.",
+                message=f"Scene {ref.id} has no OME/METADATA.ome.xml; OME-backed axis repair is unavailable.",
             )
         )
 
@@ -102,16 +105,18 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
 
 
 def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> RepairReport:
-    """Repair scene-level ``t`` and ``z`` metadata when stronger evidence exists.
+    """Repair scene-level metadata when stronger evidence exists.
 
     Parameters
     ----------
     ds:
         Open dataset handle.
     scene_id:
-        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`, for example
+        ``0``, ``"0"``, or a unique multiscale scene name.
     persist:
-        If ``True``, write accepted repairs back into the scene metadata.
+        If ``True``, write accepted repairs back into the scene metadata. This
+        requires that the dataset was opened with ``mode="a"``.
 
     Returns
     -------
@@ -122,7 +127,10 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
     -----
     ``x`` and ``y`` calibration are never invented. ``t`` repair remains
     intentionally conservative and only succeeds when OME metadata provides a
-    trustworthy scalar increment.
+    trustworthy scalar increment. When ``omero.channels[].window`` metadata is
+    present or can be synthesized safely, the display window is also repaired
+    from sampled level-0 intensities while ``window.min`` and ``window.max``
+    are aligned to the image dtype bounds.
     """
     ref = ds.scene_ref(scene_id)
     logger.info("Repairing axis metadata for scene %s (persist=%s)", ref.id, persist)
@@ -135,20 +143,15 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
     errors = list(report.errors)
     axis_states = dict(report.axis_states)
     repaired_axes: dict[str, AxisState] = {}
+    repaired_omero: dict | None = None
 
     try:
         ome_scene = scene_ome_metadata(ds, ref.id)
     except FileNotFoundError:
-        logger.warning("Skipping repair for scene %s because OME/METADATA.ome.xml is missing", ref.id)
-        return RepairReport(
-            scene_id=ref.id,
-            persisted=False,
-            axis_states=axis_states,
-            warnings=warnings,
-            errors=errors,
-        )
+        ome_scene = None
+        logger.warning("OME-backed axis repair unavailable for scene %s because OME/METADATA.ome.xml is missing", ref.id)
 
-    if axis_states["z"].placeholder:
+    if ome_scene is not None and axis_states["z"].placeholder:
         repaired_z, z_messages = _resolve_z_axis(ref.id, ome_scene)
         warnings.extend(z_messages)
         if repaired_z is not None:
@@ -156,7 +159,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
             axis_states["z"] = repaired_z
             repaired_axes["z"] = repaired_z
 
-    if axis_states["t"].placeholder:
+    if ome_scene is not None and axis_states["t"].placeholder:
         repaired_t, t_messages = _resolve_t_axis(ref.id, ome_scene)
         warnings.extend(t_messages)
         if repaired_t is not None:
@@ -164,29 +167,43 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
             axis_states["t"] = repaired_t
             repaired_axes["t"] = repaired_t
 
+    repaired_omero, omero_messages = _resolve_channel_windows(ds, ref.id)
+    warnings.extend(omero_messages)
+
     persisted = False
-    if persist and repaired_axes:
+    if persist and (repaired_axes or repaired_omero is not None):
         require_writable(ds)
         attrs = deepcopy(scene_metadata(ds, ref.id, corrected=False))
-        _apply_scene_axis_repairs(attrs, repaired_axes, ref.id)
+        if repaired_axes:
+            _apply_scene_axis_repairs(attrs, repaired_axes, ref.id)
+        if repaired_omero is not None:
+            _apply_scene_channel_repairs(attrs, repaired_omero)
         microio = dict(attrs.get("microio", {}))
         repair_block = dict(microio.get("repair", {}))
         repair_block["schema_version"] = MICROIO_SCHEMA_VERSION
-        repair_block["repaired_axes"] = {
-            axis: {
-                "value": state.value,
-                "unit": state.unit,
-                "source": state.source,
-                "confidence": state.confidence,
-                "warning_code": state.warning_code,
+        if repaired_axes:
+            repair_block["repaired_axes"] = {
+                axis: {
+                    "value": state.value,
+                    "unit": state.unit,
+                    "source": state.source,
+                    "confidence": state.confidence,
+                    "warning_code": state.warning_code,
+                }
+                for axis, state in repaired_axes.items()
             }
-            for axis, state in repaired_axes.items()
-        }
+        elif "repaired_axes" not in repair_block:
+            repair_block["repaired_axes"] = {}
         microio["repair"] = repair_block
         attrs["microio"] = microio
         write_scene_attrs(ds, ref.id, attrs)
         persisted = True
-        logger.info("Persisted repaired axes for scene %s: %s", ref.id, sorted(repaired_axes))
+        logger.info(
+            "Persisted repaired metadata for scene %s: axes=%s channels=%s",
+            ref.id,
+            sorted(repaired_axes),
+            repaired_omero is not None,
+        )
 
     return RepairReport(
         scene_id=ref.id,
@@ -222,6 +239,11 @@ def _apply_scene_axis_repairs(attrs: dict, repaired_axes: dict[str, AxisState], 
     multiscale["axes"] = axes
     multiscale["datasets"] = datasets
     attrs["multiscales"] = [multiscale]
+
+
+def _apply_scene_channel_repairs(attrs: dict, repaired_omero: dict) -> None:
+    """Apply repaired ``omero`` channel metadata to a scene attrs payload."""
+    attrs["omero"] = deepcopy(repaired_omero)
 
 def _resolve_z_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[ValidationMessage]]:
     """Resolve a scalar z spacing from OME pixel sizes or per-plane positions."""
@@ -304,6 +326,180 @@ def _resolve_t_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[Va
         )
     )
     return None, messages
+
+
+def _resolve_channel_windows(ds, scene_id: str) -> tuple[dict | None, list[ValidationMessage]]:
+    """Resolve repaired ``omero.channels[].window`` metadata from level-0 data."""
+    messages: list[ValidationMessage] = []
+    attrs = scene_metadata(ds, scene_id, corrected=False)
+    array = ds.read_level_zarr(scene_id, 0)
+    dtype = np.dtype(array.dtype)
+    dtype_bounds = _dtype_window_bounds(dtype)
+    if dtype_bounds is None:
+        messages.append(
+            ValidationMessage(
+                level="warning",
+                code="omero_window_dtype_unsupported",
+                message=f"Scene {scene_id} dtype {dtype} does not support OMERO window bounds; channel repair skipped.",
+            )
+        )
+        return None, messages
+
+    channel_count = int(array.shape[1])
+    sampled_windows = _sample_channel_windows(array)
+    current_omero = deepcopy(attrs.get("omero")) if isinstance(attrs.get("omero"), dict) else {}
+    current_channels = current_omero.get("channels")
+    existing_channels = (
+        [deepcopy(item) for item in current_channels]
+        if isinstance(current_channels, list)
+        and len(current_channels) == channel_count
+        and all(isinstance(item, dict) for item in current_channels)
+        else None
+    )
+    if existing_channels is None and current_channels is not None:
+        messages.append(
+            ValidationMessage(
+                level="warning",
+                code="omero_channels_rebuilt",
+                message=(
+                    f"Scene {scene_id} has unusable omero channel metadata; "
+                    f"rebuilding {channel_count} channel entries from image metadata."
+                ),
+            )
+        )
+    channels = existing_channels or [_default_channel_metadata(index, channel_count) for index in range(channel_count)]
+
+    dtype_min, dtype_max = dtype_bounds
+    for index, bounds in enumerate(sampled_windows):
+        start = min(max(bounds[0], dtype_min), dtype_max)
+        end = min(max(bounds[1], start), dtype_max)
+        channel = channels[index]
+        channel.setdefault("active", True)
+        channel.setdefault("coefficient", 1)
+        channel.setdefault("family", "linear")
+        channel.setdefault("inverted", False)
+        channel["label"] = str(channel.get("label", ""))
+        color = str(channel.get("color") or _default_channel_color(index, channel_count)).upper()
+        channel["color"] = color if _is_hex_rgb(color) else _default_channel_color(index, channel_count)
+        channel["window"] = {
+            "min": float(dtype_min),
+            "max": float(dtype_max),
+            "start": float(start),
+            "end": float(end),
+        }
+
+    repaired = deepcopy(current_omero)
+    repaired["channels"] = channels
+    if not isinstance(repaired.get("rdefs"), dict):
+        repaired["rdefs"] = _default_rdefs(channel_count)
+    return repaired if repaired != attrs.get("omero") else None, messages
+
+
+def _sample_channel_windows(array) -> list[tuple[float, float]]:
+    """Sample level-0 image data chunk-by-chunk to estimate per-channel extrema."""
+    shape = tuple(int(dim) for dim in array.shape)
+    chunks = _chunk_lengths(array)
+    channel_count = shape[1]
+    sampled: list[tuple[float, float]] = []
+    for channel in range(channel_count):
+        minimum = math.inf
+        maximum = -math.inf
+        t_starts = _sample_chunk_starts(shape[0], chunks[0], max_chunks=8)
+        z_starts = _sample_chunk_starts(shape[2], chunks[2], max_chunks=8)
+        y_starts = _sample_chunk_starts(shape[3], chunks[3], max_chunks=4)
+        x_starts = _sample_chunk_starts(shape[4], chunks[4], max_chunks=4)
+        for t_start, z_start, y_start, x_start in product(t_starts, z_starts, y_starts, x_starts):
+            patch = np.asarray(
+                array[
+                    slice(t_start, min(t_start + 1, shape[0])),
+                    slice(channel, channel + 1),
+                    slice(z_start, min(z_start + 1, shape[2])),
+                    slice(y_start, min(y_start + _sample_patch_size(chunks[3], shape[3] - y_start), shape[3])),
+                    slice(x_start, min(x_start + _sample_patch_size(chunks[4], shape[4] - x_start), shape[4])),
+                ]
+            )
+            if patch.size == 0:
+                continue
+            minimum = min(minimum, float(np.min(patch)))
+            maximum = max(maximum, float(np.max(patch)))
+        if not math.isfinite(minimum) or not math.isfinite(maximum):
+            minimum = 0.0
+            maximum = 0.0
+        sampled.append((minimum, maximum))
+    return sampled
+
+
+def _dtype_window_bounds(dtype: np.dtype) -> tuple[float, float] | None:
+    """Return exact dtype bounds for OMERO windows."""
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        return float(info.min), float(info.max)
+    if np.issubdtype(dtype, np.floating):
+        info = np.finfo(dtype)
+        return float(info.min), float(info.max)
+    return None
+
+
+def _chunk_lengths(array) -> tuple[int, ...]:
+    """Normalize Zarr chunk metadata to one integer chunk length per axis."""
+    chunks = getattr(array, "chunks", None)
+    if chunks is None:
+        return tuple(int(dim) for dim in array.shape)
+    normalized: list[int] = []
+    for axis_chunks, size in zip(chunks, array.shape, strict=True):
+        if isinstance(axis_chunks, int):
+            normalized.append(int(axis_chunks))
+        elif isinstance(axis_chunks, tuple) and axis_chunks:
+            normalized.append(int(axis_chunks[0]))
+        else:
+            normalized.append(int(size))
+    return tuple(normalized)
+
+
+def _sample_chunk_starts(size: int, chunk: int, *, max_chunks: int) -> list[int]:
+    """Choose deterministic chunk starts spanning an axis."""
+    if size <= 0:
+        return [0]
+    chunk = max(1, int(chunk))
+    count = max(1, math.ceil(size / chunk))
+    if count <= max_chunks:
+        indices = range(count)
+    else:
+        indices = sorted({int(round(value)) for value in np.linspace(0, count - 1, num=max_chunks)})
+    return [min(index * chunk, max(size - 1, 0)) for index in indices]
+
+
+def _sample_patch_size(chunk: int, remaining: int) -> int:
+    """Choose a small in-chunk patch size for sampled intensity reads."""
+    return max(1, min(int(chunk), int(remaining), 16))
+
+
+def _default_channel_metadata(index: int, channel_count: int) -> dict:
+    """Build a minimal OMERO channel entry."""
+    return {
+        "active": True,
+        "coefficient": 1,
+        "color": _default_channel_color(index, channel_count),
+        "family": "linear",
+        "inverted": False,
+        "label": "",
+    }
+
+
+def _default_channel_color(index: int, channel_count: int) -> str:
+    """Choose deterministic fallback colors for synthesized OMERO channels."""
+    palette = ["808080"] if channel_count == 1 else ["00FF00", "FF0000", "0000FF", "FFFFFF", "FF00FF", "00FFFF"]
+    return palette[index % len(palette)]
+
+
+def _default_rdefs(channel_count: int) -> dict:
+    """Build conservative fallback rendering defaults."""
+    return {"defaultT": 0, "defaultZ": 0, "model": "greyscale" if channel_count == 1 else "color"}
+
+
+def _is_hex_rgb(value: str) -> bool:
+    """Return whether ``value`` is a 6-digit hexadecimal RGB string."""
+    return len(value) == 6 and all(char in "0123456789ABCDEF" for char in value)
 
 
 def _infer_z_from_planes(ome_scene) -> tuple[float | None, str | None, list[ValidationMessage]]:

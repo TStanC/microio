@@ -6,7 +6,6 @@ from copy import deepcopy
 from typing import Any
 
 from microio.common.constants import DEFAULT_TARGET_NGFF
-from microio.common.mutations import replace_attrs
 
 
 OME_ATTR_KEYS = frozenset(
@@ -76,10 +75,45 @@ def replace_ome_attrs(
     extra_attrs: dict[str, Any] | None = None,
     ome_version: str = DEFAULT_TARGET_NGFF,
 ) -> None:
-    """Replace attrs on a node while serializing OME metadata for its Zarr format."""
+    """Replace attrs on a node while serializing OME metadata for its Zarr format.
+
+    Parameters
+    ----------
+    node:
+        Zarr group or array whose attrs should be replaced.
+    ome:
+        Semantic OME metadata without the top-level ``ome`` wrapper. Example::
+
+            {
+                "multiscales": [
+                    {
+                        "name": "scene",
+                        "axes": [
+                            {"name": "t", "type": "time"},
+                            {"name": "c", "type": "channel"},
+                            {"name": "z", "type": "space", "unit": "micrometer"},
+                            {"name": "y", "type": "space", "unit": "micrometer"},
+                            {"name": "x", "type": "space", "unit": "micrometer"},
+                        ],
+                        "datasets": [
+                            {
+                                "path": "0",
+                                "coordinateTransformations": [{"type": "scale", "scale": [1, 1, 1, 1, 1]}],
+                            }
+                        ],
+                    }
+                ],
+                "omero": {"channels": []},
+            }
+    extra_attrs:
+        Additional non-OME attrs to persist alongside the semantic OME block.
+    ome_version:
+        OME-NGFF version string to store when the target node uses Zarr v3.
+    """
     attrs = deepcopy(extra_attrs or {})
     if node_zarr_format(node) >= 3:
         attrs["ome"] = {"version": ome_version, **deepcopy(ome)}
     else:
         attrs.update(deepcopy(ome))
-    replace_attrs(node, attrs)
+    node.attrs.clear()
+    node.attrs.update(attrs)

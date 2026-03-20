@@ -12,7 +12,7 @@ def test_open_subset_in_dataset_order(lif_subset):
     assert ds.read_scene_ome_metadata("15").name == "E8Flex/Stripes/300_300_Merged"
 
 
-def test_vsi_repair_persists_z_only(vsi_subset):
+def test_vsi_repair_persists_z_and_dtype_window_bounds(vsi_subset):
     ds = open_dataset(vsi_subset, mode="a")
     table, table_report = ds.ensure_plane_table("0")
     repair = ds.repair_axis_metadata("0", persist=True)
@@ -29,11 +29,15 @@ def test_vsi_repair_persists_z_only(vsi_subset):
     raw = ds.read_scene_metadata("0", corrected=False)
     z_axis = next(axis for axis in corrected["multiscales"][0]["axes"] if axis["name"] == "z")
     raw_z_axis = next(axis for axis in raw["multiscales"][0]["axes"] if axis["name"] == "z")
+    window = raw["omero"]["channels"][0]["window"]
     assert z_axis["unit"] == "micrometer"
     assert corrected["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 0.75
     assert raw_z_axis["unit"] == "micrometer"
     assert raw["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 0.75
     assert raw["microio"]["repair"]["repaired_axes"]["z"]["value"] == 0.75
+    assert window["min"] == 0.0
+    assert window["max"] == 65535.0
+    assert 0.0 <= window["start"] <= window["end"] <= 65535.0
 
 
 def test_ensure_plane_table_is_idempotent(vsi_subset):
@@ -46,8 +50,21 @@ def test_ensure_plane_table_is_idempotent(vsi_subset):
     assert len(table["the_z"]) == 3400
 
 
+def test_lif_repair_updates_channel_windows_to_dtype_bounds(lif_subset):
+    ds = open_dataset(lif_subset, mode="a")
+    repair = ds.repair_axis_metadata("14", persist=True)
+    channels = ds.read_scene_metadata("14", corrected=False)["omero"]["channels"]
+
+    assert repair.persisted is True
+    assert len(channels) == 3
+    assert [channel["window"]["min"] for channel in channels] == [0.0, 0.0, 0.0]
+    assert [channel["window"]["max"] for channel in channels] == [255.0, 255.0, 255.0]
+    assert all(0.0 <= channel["window"]["start"] <= channel["window"]["end"] <= 255.0 for channel in channels)
+
+
 def test_source_fixture_is_not_modified(vsi_subset):
     source_attrs = json.loads(
         (Path(__file__).resolve().parents[3] / "data_in" / "zarr" / "vsi_test.zarr" / "0" / ".zattrs").read_text()
     )
     assert source_attrs["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 1.0
+    assert source_attrs["omero"]["channels"][0]["window"]["max"] == 22800.0
