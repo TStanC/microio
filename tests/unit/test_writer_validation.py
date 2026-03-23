@@ -4,11 +4,13 @@ from pathlib import Path
 import shutil
 import uuid
 
+import dask.array as da
 import numpy as np
 import pytest
 import zarr
 
 from microio.reader.open import open_dataset
+from microio.writer.images import _default_label_chunks_for_write_mode
 
 
 DATA_OUT = Path(__file__).resolve().parents[3] / "data_out"
@@ -218,6 +220,72 @@ def test_write_label_timepoint_rejects_metadata_updates_on_existing_label():
         ds.write_label_timepoint("0", "mask", frame, timepoint=0)
         with pytest.raises(ValueError, match="cannot accept dtype, chunks, attrs, colors, or properties"):
             ds.write_label_timepoint("0", "mask", frame, timepoint=1, attrs={"kind": "second"})
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_timepoint_label_chunk_defaults_ignore_full_time_extent():
+    full_shape = (100, 1, 34, 2800, 2800)
+    dtype = np.dtype(np.uint16)
+
+    full_chunks = _default_label_chunks_for_write_mode(full_shape, dtype, None, write_mode="full")
+    timepoint_chunks = _default_label_chunks_for_write_mode(full_shape, dtype, None, write_mode="timepoint")
+
+    assert full_chunks[0] > 1
+    assert timepoint_chunks[0] == 1
+    assert timepoint_chunks[3] > full_chunks[3]
+    assert timepoint_chunks[4] > full_chunks[4]
+
+
+def test_write_label_timepoint_initializes_array_with_single_timepoint_chunks():
+    dataset = _fresh_dataset_path("writer_label_timepoint_chunks")
+    try:
+        root = zarr.open(dataset, mode="w", zarr_format=3)
+        scene = root.create_group("0")
+        scene.attrs["ome"] = {
+            "version": "0.5",
+            "multiscales": [
+                {
+                    "name": "scene",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space", "unit": "micrometer"},
+                        {"name": "y", "type": "space", "unit": "micrometer"},
+                        {"name": "x", "type": "space", "unit": "micrometer"},
+                    ],
+                    "datasets": [
+                        {
+                            "path": "0",
+                            "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 2.0, 0.5, 0.5]}],
+                        }
+                    ],
+                }
+            ],
+        }
+        scene.create_array(
+            "0",
+            shape=(100, 1, 34, 2800, 2800),
+            dtype=np.uint16,
+            chunks=(1, 1, 1, 256, 256),
+            dimension_names=("t", "c", "z", "y", "x"),
+            write_data=False,
+        )
+        ome = root.create_group("OME")
+        ome.attrs["ome"] = {"version": "0.5", "series": ["0"]}
+        (dataset / "OME" / "METADATA.ome.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?><OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image Name="scene"><Pixels SizeT="100" SizeC="1" SizeZ="34" SizeY="2800" SizeX="2800"/></Image></OME>',
+            encoding="utf-8",
+        )
+
+        ds = open_dataset(dataset, mode="a")
+        frame = da.zeros((1, 1, 34, 2800, 2800), chunks=(1, 1, 1, 700, 700), dtype=np.uint16)
+        ds.write_label_timepoint("0", "mask", frame, timepoint=0)
+
+        chunks = tuple(int(chunk) for chunk in ds.root["0"]["labels"]["mask"]["0"].chunks)
+        assert chunks[0] == 1
+        assert chunks[3] >= 350
+        assert chunks[4] >= 350
     finally:
         shutil.rmtree(dataset, ignore_errors=True)
 
