@@ -10,7 +10,6 @@ import pytest
 import zarr
 
 from microio.reader.open import open_dataset
-from microio.writer.images import _default_label_chunks_for_write_mode
 
 
 DATA_OUT = Path(__file__).resolve().parents[3] / "data_out"
@@ -224,17 +223,18 @@ def test_write_label_timepoint_rejects_metadata_updates_on_existing_label():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
-def test_timepoint_label_chunk_defaults_ignore_full_time_extent():
-    full_shape = (100, 1, 34, 2800, 2800)
-    dtype = np.dtype(np.uint16)
+def test_write_label_image_defaults_to_source_chunks():
+    dataset = _fresh_dataset_path("writer_label_source_chunks")
+    try:
+        _create_writable_dataset(dataset, zarr_format=3, times=3, channels=2)
+        ds = open_dataset(dataset, mode="a")
+        label_data = np.zeros((3, 1, 1, 4, 4), dtype=np.uint16)
+        ds.write_label_image("0", "mask", label_data)
 
-    full_chunks = _default_label_chunks_for_write_mode(full_shape, dtype, None, write_mode="full")
-    timepoint_chunks = _default_label_chunks_for_write_mode(full_shape, dtype, None, write_mode="timepoint")
-
-    assert full_chunks[0] > 1
-    assert timepoint_chunks[0] == 1
-    assert timepoint_chunks[3] > full_chunks[3]
-    assert timepoint_chunks[4] > full_chunks[4]
+        chunks = tuple(int(chunk) for chunk in ds.root["0"]["labels"]["mask"]["0"].chunks)
+        assert chunks == (3, 1, 1, 4, 4)
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
 
 
 def test_write_label_timepoint_initializes_array_with_single_timepoint_chunks():
@@ -283,9 +283,7 @@ def test_write_label_timepoint_initializes_array_with_single_timepoint_chunks():
         ds.write_label_timepoint("0", "mask", frame, timepoint=0)
 
         chunks = tuple(int(chunk) for chunk in ds.root["0"]["labels"]["mask"]["0"].chunks)
-        assert chunks[0] == 1
-        assert chunks[3] >= 350
-        assert chunks[4] >= 350
+        assert chunks == (1, 1, 1, 256, 256)
     finally:
         shutil.rmtree(dataset, ignore_errors=True)
 

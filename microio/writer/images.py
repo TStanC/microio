@@ -502,11 +502,12 @@ def _prepare_label_group(
         for dataset_md in source_datasets:
             path = str(dataset_md["path"])
             target_shape = level_shapes[path]
-            target_chunks = _default_label_chunks_for_write_mode(
+            target_chunks = _label_chunks_from_source(
+                ds,
+                scene_id,
+                path,
                 target_shape,
-                dtype_obj,
                 chunks,
-                write_mode=write_mode,
             )
             label_group.create_array(
                 path,
@@ -581,25 +582,18 @@ def _label_level_shapes(ds, scene_id: str, label_shape: tuple[int, ...], source_
     return out
 
 
-def _default_label_chunks_for_write_mode(
-    shape: tuple[int, ...],
-    dtype_obj: np.dtype,
+def _label_chunks_from_source(
+    ds,
+    scene_id: str,
+    level_path: str,
+    target_shape: tuple[int, ...],
     chunks: tuple[int, ...] | None,
-    *,
-    write_mode: str,
 ) -> tuple[int, ...]:
-    """Choose label-array chunks that match the expected write pattern.
-
-    Whole-image writes can size chunks against the full array, but timepoint
-    writes should size chunks against a single-frame workload so the time axis
-    does not force tiny spatial chunks.
-    """
+    """Choose label-array chunks by inheriting the source image chunk layout."""
     if chunks is not None:
-        return default_chunks(shape, dtype_obj, chunks)
-    if write_mode != "timepoint":
-        return default_chunks(shape, dtype_obj, None)
-    single_timepoint_shape = (1, *shape[1:])
-    return default_chunks(single_timepoint_shape, dtype_obj, None)
+        return tuple(int(max(1, min(dim, chunk))) for dim, chunk in zip(target_shape, chunks, strict=True))
+    source_chunks = tuple(int(chunk) for chunk in ds.read_level_zarr(scene_id, level_path).chunks)
+    return tuple(min(int(dim), int(chunk)) for dim, chunk in zip(target_shape, source_chunks, strict=True))
 
 
 def _full_region(shape: tuple[int, ...]) -> tuple[slice, ...]:
