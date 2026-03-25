@@ -10,7 +10,7 @@ from microio.reader.open import open_dataset
 
 def test_lif_scenes_do_not_auto_repair_t(lif_subset):
     ds = open_dataset(lif_subset, mode="a")
-    repair = ds.repair_axis_metadata("14", persist=True)
+    repair = ds.repair_axis_metadata("15", persist=True)
     assert repair.persisted is True
     assert any(message.code in {"t_not_repaired", "t_unresolved"} for message in repair.warnings)
     assert repair.axis_states["t"].placeholder is True

@@ -10,7 +10,7 @@ import numpy as np
 
 from microio.common.constants import MICROIO_WRITER_TABLE_SCHEMA, MICROIO_WRITER_TABLE_SCHEMA_VERSION
 from microio.common.models import TableWriteReport
-from microio.writer.common import ensure_group_absent_or_overwrite, require_child_group, require_writeable_scene
+from microio.writer.common import ensure_group_absent_or_overwrite, require_child_group, require_writeable_scene, validate_write_target_name
 
 
 logger = logging.getLogger("microio.writer.tables")
@@ -59,6 +59,7 @@ def write_table(
         Structured summary of the created or appended table.
     """
     ref = require_writeable_scene(ds, scene)
+    name = validate_write_target_name(name, kind="Table")
     logger.info(
         "Writing table %s for scene %s (append=%s overwrite=%s)",
         name,
@@ -182,14 +183,12 @@ def _append_table(
 
     old_rows = int(table.attrs.get("n_rows", 0))
     new_rows = _row_count(columns)
-    chunk = min(max(old_rows + new_rows, 1), chunk_length or 8192)
     logger.debug(
-        "Appending %d rows to %s (old_rows=%d new_total=%d chunk_hint=%d)",
+        "Appending %d rows to %s (old_rows=%d new_total=%d)",
         new_rows,
         table.path,
         old_rows,
         old_rows + new_rows,
-        chunk,
     )
     for name, arr in columns.items():
         target = table[name]
@@ -197,8 +196,6 @@ def _append_table(
             raise ValueError(f"Column {name!r} dtype mismatch: existing={target.dtype} new={arr.dtype}")
         target.resize((old_rows + new_rows,))
         target[old_rows:] = arr
-        if getattr(target, "chunks", None) != (chunk,):
-            pass
 
     table.attrs["n_rows"] = old_rows + new_rows
     return TableWriteReport(

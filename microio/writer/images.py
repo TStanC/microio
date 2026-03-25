@@ -29,6 +29,7 @@ from microio.writer.common import (
     require_writeable_scene,
     source_level_metadata,
     source_pyramid_metadata,
+    validate_write_target_name,
     write_array,
     write_array_region,
 )
@@ -104,6 +105,7 @@ def write_label_image(
     """
     _validate_label_source_level(source_level)
     ref = require_writeable_scene(ds, scene)
+    name = validate_write_target_name(name, kind="Label")
     logger.info("Writing label image %s for scene %s", name, ref.id)
     array_like = maybe_cast_array(coerce_array(data), dtype)
     dtype_obj = _validate_label_array_dtype(array_like)
@@ -234,6 +236,7 @@ def write_label_timepoint(
     """
     _validate_label_source_level(source_level)
     ref = require_writeable_scene(ds, scene)
+    name = validate_write_target_name(name, kind="Label")
     logger.info("Writing label timepoint %s for %s/%s", timepoint, ref.id, name)
     array_like = maybe_cast_array(coerce_array(data), dtype)
     dtype_obj = _validate_label_array_dtype(array_like)
@@ -343,6 +346,7 @@ def write_roi(
     the original axis count instead of squeezing dimensions away.
     """
     ref = require_writeable_scene(ds, scene)
+    name = validate_write_target_name(name, kind="ROI")
     logger.info("Writing ROI %s for scene %s from source level %s", name, ref.id, source_level)
     _, multiscale, dataset_md = source_level_metadata(ds, ref.id, source_level)
     axes = [axis["name"] for axis in multiscale["axes"]]
@@ -480,7 +484,6 @@ def _prepare_label_group(
     write_mode: str,
 ):
     """Return an initialized label group plus the derived source-level shapes."""
-    _validate_label_name(name)
     _, multiscale, source_datasets = source_pyramid_metadata(ds, scene_id)
     level0 = ds.level_ref(scene_id, 0)
     source_shape = tuple(int(dim) for dim in level0.shape)
@@ -518,6 +521,16 @@ def _prepare_label_group(
                 overwrite=True,
                 write_data=False,
             )
+        if write_mode == "timepoint":
+            level0_chunks = tuple(int(chunk) for chunk in label_group["0"].chunks)
+            if level0_chunks and level0_chunks[0] > 1:
+                logger.warning(
+                    "Label %s for scene %s was initialized with time chunks spanning %d frames; "
+                    "timepoint writes remain valid but may incur extra write amplification.",
+                    name,
+                    scene_id,
+                    level0_chunks[0],
+                )
         replace_node_ome_metadata(labels, {"labels": _updated_label_listing(labels, name)})
         replace_node_ome_metadata(
             label_group,
@@ -750,8 +763,8 @@ def _normalize_roi_slices(shape: tuple[int, ...], axes: list[str], slices: dict[
         start = 0 if spec.start is None else spec.start
         stop = size if spec.stop is None else spec.stop
         step = 1 if spec.step is None else spec.step
-        if step <= 0:
-            raise ValueError(f"Axis {axis!r} step must be positive")
+        if step != 1:
+            raise NotImplementedError(f"Axis {axis!r} slice step {step!r} is not implemented for ROI writes")
         if start < 0 or stop > size or start > stop:
             raise ValueError(f"Axis {axis!r} slice {spec!r} is out of bounds for size {size}")
         normalized.append(slice(start, stop, step))
@@ -858,9 +871,3 @@ def _image_label_version(multiscale: dict[str, Any]) -> str:
     """Choose the image-label schema version matching the source metadata dialect."""
     multiscale_version = str(multiscale.get("version", "0.5"))
     return "0.4" if multiscale_version.startswith("0.4") else "0.5"
-
-
-def _validate_label_name(name: str) -> None:
-    """Reject empty label names."""
-    if not str(name):
-        raise ValueError("Label names must be non-empty")

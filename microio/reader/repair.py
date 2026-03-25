@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from itertools import product
 import logging
 import math
 import statistics
@@ -14,13 +13,14 @@ from microio.common.constants import AXES_ORDER, MICROIO_SCHEMA_VERSION
 from microio.common.mutations import require_writable, write_scene_attrs
 from microio.common.models import AxisState, RepairReport, ValidationMessage
 from microio.common.units import normalize_unit
-from microio.reader.metadata import multiscale_metadata, scene_metadata, scene_ome_metadata
+from microio.reader.metadata import multiscale_metadata, original_metadata, scene_metadata, scene_ome_metadata
+from microio.reader.timing import resolve_plane_time_source, scalar_t_from_plane_source
 
 
 logger = logging.getLogger("microio.reader.repair")
 
 
-def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
+def inspect_axis_metadata(ds, scene_id: int | str, *, filetype: str | None = None) -> RepairReport:
     """Inspect one scene's axis metadata without mutating the store.
 
     Parameters
@@ -35,6 +35,11 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
     RepairReport
         Structured summary of the current axis state, including placeholder
         detection, warnings, and validation errors.
+
+    Notes
+    -----
+    ``filetype`` is advisory. Only ``"vsi"`` currently enables additional
+    format-specific timing provenance during later repair.
     """
     ref = ds.scene_ref(scene_id)
     logger.debug("Inspecting axis metadata for scene %s", ref.id)
@@ -81,6 +86,7 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
                 errors.append(t_error)
 
     if axis_states["t"].placeholder:
+        logger.warning("Scene %s has placeholder t metadata", ref.id)
         warnings.append(
             ValidationMessage(
                 level="warning",
@@ -104,7 +110,7 @@ def inspect_axis_metadata(ds, scene_id: int | str) -> RepairReport:
     return RepairReport(scene_id=ref.id, persisted=False, axis_states=axis_states, warnings=warnings, errors=errors)
 
 
-def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> RepairReport:
+def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True, filetype: str | None = None) -> RepairReport:
     """Repair scene-level metadata when stronger evidence exists.
 
     Parameters
@@ -133,8 +139,8 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
     are aligned to the image dtype bounds.
     """
     ref = ds.scene_ref(scene_id)
-    logger.info("Repairing axis metadata for scene %s (persist=%s)", ref.id, persist)
-    report = inspect_axis_metadata(ds, ref.id)
+    logger.info("Repairing axis metadata for scene %s (persist=%s filetype=%s)", ref.id, persist, filetype)
+    report = inspect_axis_metadata(ds, ref.id, filetype=filetype)
     if report.errors:
         logger.info("Skipping repair for scene %s because validation reported %d errors", ref.id, len(report.errors))
         return report
@@ -160,15 +166,24 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
             repaired_axes["z"] = repaired_z
 
     if ome_scene is not None and axis_states["t"].placeholder:
-        repaired_t, t_messages = _resolve_t_axis(ref.id, ome_scene)
+        repaired_t, t_messages = _resolve_t_axis(
+            ref.id,
+            ome_scene,
+            filetype=filetype,
+            original_md=original_metadata(ds) if str(filetype or "").lower() == "vsi" else None,
+        )
         warnings.extend(t_messages)
         if repaired_t is not None:
             logger.info("Resolved t axis for scene %s from %s", ref.id, repaired_t.source)
             axis_states["t"] = repaired_t
             repaired_axes["t"] = repaired_t
+        else:
+            logger.warning("Unable to resolve scalar t axis for scene %s", ref.id)
 
     repaired_omero, omero_messages = _resolve_channel_windows(ds, ref.id)
     warnings.extend(omero_messages)
+    if repaired_omero is not None:
+        logger.info("Resolved OMERO channel windows for scene %s", ref.id)
 
     persisted = False
     if persist and (repaired_axes or repaired_omero is not None):
@@ -194,6 +209,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
             }
         elif "repaired_axes" not in repair_block:
             repair_block["repaired_axes"] = {}
+        repair_block["filetype"] = str(filetype) if filetype else "generic"
         microio["repair"] = repair_block
         attrs["microio"] = microio
         write_scene_attrs(ds, ref.id, attrs)
@@ -204,6 +220,8 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True) -> Re
             sorted(repaired_axes),
             repaired_omero is not None,
         )
+    elif persist:
+        logger.info("No repairable metadata changes were found for scene %s", ref.id)
 
     return RepairReport(
         scene_id=ref.id,
@@ -244,6 +262,7 @@ def _apply_scene_axis_repairs(attrs: dict, repaired_axes: dict[str, AxisState], 
 def _apply_scene_channel_repairs(attrs: dict, repaired_omero: dict) -> None:
     """Apply repaired ``omero`` channel metadata to a scene attrs payload."""
     attrs["omero"] = deepcopy(repaired_omero)
+
 
 def _resolve_z_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[ValidationMessage]]:
     """Resolve a scalar z spacing from OME pixel sizes or per-plane positions."""
@@ -295,11 +314,18 @@ def _resolve_z_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[Va
     )
 
 
-def _resolve_t_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[ValidationMessage]]:
+def _resolve_t_axis(
+    scene_id: str,
+    ome_scene,
+    *,
+    filetype: str | None,
+    original_md: dict[str, str] | None,
+) -> tuple[AxisState | None, list[ValidationMessage]]:
     """Resolve a scalar t spacing from unambiguous OME timing metadata."""
     messages: list[ValidationMessage] = []
     unit, warn = normalize_unit(ome_scene.time_increment_unit)
     if ome_scene.time_increment is not None and ome_scene.time_increment > 0 and unit not in {None, "unknown"}:
+        logger.info("Using Pixels.TimeIncrement for scalar t repair in scene %s", scene_id)
         return (
             AxisState(
                 axis="t",
@@ -315,14 +341,19 @@ def _resolve_t_axis(scene_id: str, ome_scene) -> tuple[AxisState | None, list[Va
             messages,
         )
 
+    plane_source, source_messages = resolve_plane_time_source(ome_scene, filetype=filetype, original_metadata=original_md)
+    messages.extend(source_messages)
+    if plane_source is not None:
+        logger.debug("Attempting scalar t repair for scene %s from %s", scene_id, plane_source.source)
+        state, plane_messages = scalar_t_from_plane_source(scene_id, plane_source)
+        messages.extend(plane_messages)
+        return state, messages
+
     messages.append(
         ValidationMessage(
             level="warning",
             code="t_not_repaired",
-            message=(
-                f"Scene {scene_id} t metadata stays unresolved; Plane.DeltaT and generic OriginalMetadata are "
-                "not collapsed to a single scalar in v1."
-            ),
+            message=f"Scene {scene_id} t metadata stays unresolved; no complete trusted per-plane time source was found.",
         )
     )
     return None, messages
@@ -396,19 +427,16 @@ def _resolve_channel_windows(ds, scene_id: str) -> tuple[dict | None, list[Valid
 
 
 def _sample_channel_windows(array) -> list[tuple[float, float]]:
-    """Sample level-0 image data chunk-by-chunk to estimate per-channel extrema."""
+    """Sample level-0 image data with a bounded set of chunk reads per channel."""
     shape = tuple(int(dim) for dim in array.shape)
     chunks = _chunk_lengths(array)
     channel_count = shape[1]
     sampled: list[tuple[float, float]] = []
+    patch_origins = _sample_patch_origins(shape, chunks, max_samples=24)
     for channel in range(channel_count):
         minimum = math.inf
         maximum = -math.inf
-        t_starts = _sample_chunk_starts(shape[0], chunks[0], max_chunks=8)
-        z_starts = _sample_chunk_starts(shape[2], chunks[2], max_chunks=8)
-        y_starts = _sample_chunk_starts(shape[3], chunks[3], max_chunks=4)
-        x_starts = _sample_chunk_starts(shape[4], chunks[4], max_chunks=4)
-        for t_start, z_start, y_start, x_start in product(t_starts, z_starts, y_starts, x_starts):
+        for t_start, z_start, y_start, x_start in patch_origins:
             patch = np.asarray(
                 array[
                     slice(t_start, min(t_start + 1, shape[0])),
@@ -467,6 +495,28 @@ def _sample_chunk_starts(size: int, chunk: int, *, max_chunks: int) -> list[int]
     else:
         indices = sorted({int(round(value)) for value in np.linspace(0, count - 1, num=max_chunks)})
     return [min(index * chunk, max(size - 1, 0)) for index in indices]
+
+
+def _sample_patch_origins(shape: tuple[int, ...], chunks: tuple[int, ...], *, max_samples: int) -> list[tuple[int, int, int, int]]:
+    """Return deterministic chunk origins spanning t/z and a small set of y/x locations."""
+    t_starts = _sample_chunk_starts(shape[0], chunks[0], max_chunks=4)
+    z_starts = _sample_chunk_starts(shape[2], chunks[2], max_chunks=4)
+    y_starts = _sample_chunk_starts(shape[3], chunks[3], max_chunks=2)
+    x_starts = _sample_chunk_starts(shape[4], chunks[4], max_chunks=2)
+
+    origins: list[tuple[int, int, int, int]] = []
+    total = max(1, int(max_samples))
+    for index in range(total):
+        t_start = t_starts[index % len(t_starts)]
+        z_start = z_starts[(index // len(t_starts)) % len(z_starts)]
+        y_start = y_starts[(index // max(1, len(t_starts) * len(z_starts))) % len(y_starts)]
+        x_start = x_starts[(index // max(1, len(t_starts) * len(z_starts) * len(y_starts))) % len(x_starts)]
+        origin = (t_start, z_start, y_start, x_start)
+        if origin not in origins:
+            origins.append(origin)
+        if len(origins) == len(t_starts) * len(z_starts) * len(y_starts) * len(x_starts):
+            break
+    return origins
 
 
 def _sample_patch_size(chunk: int, remaining: int) -> int:

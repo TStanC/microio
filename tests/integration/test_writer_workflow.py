@@ -40,14 +40,21 @@ def test_write_table_label_and_roi_on_small_dataset():
         table = reopened.root["0"]["tables"]["nuclei"]
         label_group = reopened.root["0"]["labels"]["segmentation"]
         roi_group = reopened.root["0"]["rois"]["roi_1"]
+        loaded_table = reopened.load_table("0", "nuclei")
+        loaded_roi = reopened.load_roi("0", "roi_1")
+        label_accessor = reopened.get_label("0", "segmentation")
 
         assert table_report.row_count == 2
         assert table.attrs["description"] == "derived measurements"
         assert table["label_id"][:].tolist() == [10, 11]
+        assert loaded_table["volume"].tolist() == [12.5, 14.0]
 
         assert label_report.shape == label_data.shape
         assert label_group["0"].shape == label_data.shape
         assert label_group["1"].shape == (2, 1, 3, 6, 6)
+        assert reopened.list_labels("0") == ["segmentation"]
+        assert label_accessor.metadata().microio["source_scene_id"] == "0"
+        assert label_accessor.array(0).shape == label_data.shape
         assert label_group.attrs["microio"]["source_scene_id"] == "0"
         assert label_group.attrs["ome"]["image-label"]["source"]["image"] == "../../"
         assert tuple(label_group.attrs["ome"]["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"]) == reopened.level_ref("0", 0).scale
@@ -55,6 +62,7 @@ def test_write_table_label_and_roi_on_small_dataset():
 
         assert roi_report.shape == (2, 1, 2, 6, 6)
         assert roi_group["0"].shape == (2, 1, 2, 6, 6)
+        assert loaded_roi.array.shape == (2, 1, 2, 6, 6)
         assert roi_group.attrs["microio"]["origin"] == {"t": 0, "c": 0, "z": 0, "y": 2, "x": 3}
         assert roi_group.attrs["microio"]["source_scene_id"] == "0"
         assert "image-label" not in roi_group.attrs["ome"]
@@ -135,11 +143,14 @@ def test_write_label_timepoints_on_test_labels_fixture(test_labels_subset):
     label_group = reopened.root["0"]["labels"]["segmentation"]
     level0 = label_group["0"]
     level1 = label_group["1"]
+    label_accessor = reopened.get_label("0", "segmentation")
 
     assert report_a.initialized is True
     assert report_b.initialized is False
     assert report_a.written_timepoint == 2
     assert report_b.written_timepoint == 7
+    assert label_accessor.metadata().microio["written_timepoints"] == [2, 7]
+    assert label_accessor.level("1").path == "1"
     assert label_group.attrs["microio"]["label-attrs"] == {"source_channel": 0}
     assert label_group.attrs["microio"]["written_timepoints"] == [2, 7]
     assert int(level0[2, 0, 0, 0, 0]) == 5

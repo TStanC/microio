@@ -6,14 +6,22 @@ from copy import deepcopy
 import logging
 from pathlib import Path
 
-import dask.array as da
 from microio.common.constants import AXES_ORDER
 from microio.common.ngff import flattened_attrs
 from microio.common.models import DataFlowReport, LevelRef, SceneRef, ValidationMessage
 from microio.reader.ome_xml import OmeDocument, parse_ome_xml
+from microio.reader.multiscale import (
+    list_container_levels,
+    read_container_level,
+    read_container_level_numpy,
+    resolve_container_level,
+    validate_multiscale_axes,
+    wrap_zarr_as_dask,
+)
 
 
 logger = logging.getLogger("microio.reader.metadata")
+
 
 def list_scene_refs(ds) -> list[SceneRef]:
     """Resolve all scenes in stable dataset order and cache the result.
@@ -113,16 +121,19 @@ def scene_ref(ds, scene: int | str) -> SceneRef:
     refs = list_scene_refs(ds)
     if isinstance(scene, int):
         if 0 <= scene < len(refs):
+            logger.debug("Resolved scene index %s to scene id %s", scene, refs[scene].id)
             return refs[scene]
         raise KeyError(f"Scene index {scene} is out of range for dataset with {len(refs)} scenes")
 
     scene_text = str(scene)
     for ref in refs:
         if ref.id == scene_text:
+            logger.debug("Resolved scene id %s", scene_text)
             return ref
 
     name_matches = [ref for ref in refs if ref.name == scene_text]
     if len(name_matches) == 1:
+        logger.debug("Resolved scene name %s to scene id %s", scene_text, name_matches[0].id)
         return name_matches[0]
     if len(name_matches) > 1:
         ids = [ref.id for ref in name_matches]
@@ -268,7 +279,7 @@ def multiscale_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict
     if not isinstance(multiscales, list) or not multiscales:
         raise ValueError(f"Scene {ref.id} has no multiscales metadata")
     multiscale = multiscales[0]
-    _validate_multiscale_axes(ref.id, multiscale)
+    validate_multiscale_axes(f"Scene {ref.id}", multiscale)
     return multiscale
 
 
@@ -286,56 +297,16 @@ def list_levels(ds, scene: int | str) -> list[LevelRef]:
         If the Zarr arrays and multiscale metadata are inconsistent.
     """
     ref = scene_ref(ds, scene)
-    cached = ds._level_refs_cache.get(ref.id)
-    if cached is not None:
-        logger.debug("Using cached level refs for scene %s", ref.id)
-        return cached
-
-    logger.debug("Resolving level refs for scene %s", ref.id)
-    scene_group = ds.root[ref.id]
-    multiscale = multiscale_metadata(ds, ref.id)
-    axes = tuple(axis["name"] for axis in multiscale["axes"])
-    axis_units = tuple(axis.get("unit") for axis in multiscale["axes"])
-    levels: list[LevelRef] = []
-    previous_shape: tuple[int, ...] | None = None
-
-    for level_index, dataset in enumerate(multiscale["datasets"]):
-        path = str(dataset.get("path"))
-        if path not in scene_group:
-            raise ValueError(f"Scene {ref.id} level {path!r} is listed in multiscales but missing from the Zarr group")
-        transforms = dataset.get("coordinateTransformations")
-        if not isinstance(transforms, list) or not transforms:
-            raise ValueError(f"Scene {ref.id} level {path!r} has no coordinate transformations")
-        scale = transforms[0].get("scale")
-        if not isinstance(scale, list):
-            raise ValueError(f"Scene {ref.id} level {path!r} has malformed scale metadata")
-        if len(scale) != len(axes):
-            raise ValueError(
-                f"Scene {ref.id} level {path!r} scale length {len(scale)} does not match axis count {len(axes)}"
-            )
-        array = scene_group[path]
-        shape = tuple(int(dim) for dim in array.shape)
-        if len(shape) != len(axes):
-            raise ValueError(
-                f"Scene {ref.id} level {path!r} ndim {len(shape)} does not match multiscale axis count {len(axes)}"
-            )
-        if previous_shape is not None:
-            _validate_pyramid_shapes(ref.id, path, previous_shape, shape, axes)
-        previous_shape = shape
-        levels.append(
-            LevelRef(
-                scene_id=ref.id,
-                level_index=level_index,
-                path=path,
-                shape=shape,
-                dtype=str(array.dtype),
-                scale=tuple(float(value) for value in scale),
-                axis_names=axes,
-                axis_units=axis_units,
-            )
-        )
-    ds._level_refs_cache[ref.id] = levels
-    return levels
+    return list_container_levels(
+        ds=ds,
+        cache_key=("scene", ref.id),
+        scene_id=ref.id,
+        container_kind="scene",
+        container_name=None,
+        container_id=f"Scene {ref.id}",
+        group=ds.root[ref.id],
+        multiscale=multiscale_metadata(ds, ref.id),
+    )
 
 
 def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
@@ -347,17 +318,7 @@ def level_ref(ds, scene: int | str, level: int | str) -> LevelRef:
         If the requested level index or path is unavailable.
     """
     ref = scene_ref(ds, scene)
-    levels = list_levels(ds, ref.id)
-    if isinstance(level, int):
-        if 0 <= level < len(levels):
-            return levels[level]
-        raise KeyError(f"Scene {ref.id} level index {level} is out of range; available=0..{len(levels) - 1}")
-
-    level_text = str(level)
-    for candidate in levels:
-        if candidate.path == level_text:
-            return candidate
-    raise KeyError(f"Scene {ref.id} has no level path {level_text!r}; available={[item.path for item in levels]}")
+    return resolve_container_level(list_levels(ds, ref.id), level, container_id=f"Scene {ref.id}")
 
 
 def read_level(ds, scene: int | str, level: int | str = 0):
@@ -368,14 +329,15 @@ def read_level(ds, scene: int | str, level: int | str = 0):
     dask.array.Array
         Lazy image data backed by the underlying Zarr array.
     """
-    return _wrap_zarr_as_dask(read_level_zarr(ds, scene, level))
+    return wrap_zarr_as_dask(read_level_zarr(ds, scene, level))
 
 
 def read_level_zarr(ds, scene: int | str, level: int | str = 0):
     """Read one image level as the underlying Zarr array."""
     ref = scene_ref(ds, scene)
     level_info = level_ref(ds, ref.id, level)
-    return ds.root[ref.id][level_info.path]
+    logger.debug("Opening scene array for scene %s level %s", ref.id, level_info.path)
+    return read_container_level(ds.root[ref.id], level_info)
 
 
 def read_level_numpy(ds, scene: int | str, level: int | str = 0):
@@ -386,7 +348,9 @@ def read_level_numpy(ds, scene: int | str, level: int | str = 0):
     numpy.ndarray
         Fully materialized array data for the requested level.
     """
-    return read_level_zarr(ds, scene, level)[:]
+    ref = scene_ref(ds, scene)
+    logger.debug("Materializing scene array for scene %s level %s", ref.id, level)
+    return read_container_level_numpy(ds.root[ref.id], level_ref(ds, ref.id, level))
 
 
 def read_ome_xml(ds) -> str:
@@ -421,15 +385,7 @@ def scene_ome_metadata(ds, scene: int | str):
     ref = scene_ref(ds, scene)
     document = read_ome_document(ds)
     if ref.ome_index is not None and 0 <= ref.ome_index < len(document.scenes):
-        candidate = document.scenes[ref.ome_index]
-        if ref.name and candidate.name != ref.name and ref.duplicate_name_count == 1:
-            logger.warning(
-                "Scene %s matched XML by index but name differs: zarr=%r xml=%r",
-                ref.id,
-                ref.name,
-                candidate.name,
-            )
-        return candidate
+        return document.scenes[ref.ome_index]
 
     unique_matches = [item for item in document.scenes if item.name == ref.name]
     if len(unique_matches) == 1:
@@ -439,6 +395,7 @@ def scene_ome_metadata(ds, scene: int | str):
 
 def original_metadata(ds) -> dict[str, str]:
     """Return the OME ``OriginalMetadata`` key-value block."""
+    logger.debug("Reading OME OriginalMetadata for %s", ds.path)
     return dict(read_ome_document(ds).original_metadata)
 
 
@@ -555,62 +512,19 @@ def _resolve_ome_index(ds, scene_id: str, *, dataset_index: int, scene_name: str
     except FileNotFoundError:
         return None
 
-    if scene_id.isdigit():
-        candidate = int(scene_id)
-        if 0 <= candidate < len(document.scenes):
-            return candidate
-
-    if 0 <= dataset_index < len(document.scenes) and document.scenes[dataset_index].name == scene_name:
-        return dataset_index
+    override_map = getattr(ds, "ome_scene_map", None) or {}
+    if scene_id in override_map:
+        return int(override_map[scene_id])
 
     matches = [item.index for item in document.scenes if item.name == scene_name]
     if len(matches) == 1:
         return matches[0]
+
+    if len(_ordered_scene_ids(ds)) == len(document.scenes) and 0 <= dataset_index < len(document.scenes):
+        candidate = document.scenes[dataset_index]
+        if candidate.name == scene_name:
+            return candidate.index
     return None
-
-
-def _validate_multiscale_axes(scene_id: str, multiscale: dict) -> None:
-    """Validate axis metadata against the library's supported axis contract."""
-    axes = multiscale.get("axes")
-    datasets = multiscale.get("datasets")
-    if not isinstance(axes, list) or not axes:
-        raise ValueError(f"Scene {scene_id} has no multiscale axes metadata")
-    if not isinstance(datasets, list) or not datasets:
-        raise ValueError(f"Scene {scene_id} has no multiscale datasets metadata")
-
-    axis_names = [axis.get("name") for axis in axes]
-    if any(not isinstance(name, str) or not name for name in axis_names):
-        raise ValueError(f"Scene {scene_id} has unnamed multiscale axes")
-    if len(set(axis_names)) != len(axis_names):
-        raise ValueError(f"Scene {scene_id} has duplicate multiscale axes: {axis_names}")
-    if tuple(axis_names) != AXES_ORDER:
-        raise ValueError(f"Scene {scene_id} uses unsupported axis order {axis_names}; expected {list(AXES_ORDER)}")
-
-
-def _validate_pyramid_shapes(
-    scene_id: str,
-    level_path: str,
-    previous_shape: tuple[int, ...],
-    current_shape: tuple[int, ...],
-    axes: tuple[str, ...],
-) -> None:
-    """Ensure coarser pyramid levels do not grow relative to prior levels."""
-    for axis_name, previous_dim, current_dim in zip(axes, previous_shape, current_shape):
-        if current_dim <= 0:
-            raise ValueError(f"Scene {scene_id} level {level_path!r} axis {axis_name} has invalid size {current_dim}")
-        if current_dim > previous_dim:
-            raise ValueError(
-                f"Scene {scene_id} level {level_path!r} axis {axis_name} grows from {previous_dim} to {current_dim}"
-            )
-
-
-def _wrap_zarr_as_dask(array):
-    """Wrap a Zarr-backed array as Dask while preserving existing chunking."""
-    chunks = getattr(array, "chunks", None)
-    if chunks is not None:
-        return da.from_array(array, chunks=chunks, inline_array=True)
-    return da.from_array(array, inline_array=True)
-
 
 def _ome_xml_path(dataset_path: Path) -> Path:
     return Path(dataset_path) / "OME" / "METADATA.ome.xml"

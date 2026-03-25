@@ -70,6 +70,21 @@ def test_write_table_append_requires_matching_schema():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
+def test_write_table_append_preserves_existing_chunks():
+    dataset = _fresh_dataset_path("writer_table_append_chunks")
+    try:
+        _create_writable_dataset(dataset)
+        ds = open_dataset(dataset, mode="a")
+        ds.write_table("0", "measurements", {"a": [1, 2], "b": [3, 4]}, chunk_length=1)
+        before = tuple(int(chunk) for chunk in ds.root["0"]["tables"]["measurements"]["a"].chunks)
+        ds.write_table("0", "measurements", {"a": [5], "b": [6]}, append=True, chunk_length=8192)
+        after = tuple(int(chunk) for chunk in ds.root["0"]["tables"]["measurements"]["a"].chunks)
+        assert before == (1,)
+        assert after == before
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
 def test_write_table_supports_pandas_if_installed():
     pd = pytest.importorskip("pandas")
     dataset = _fresh_dataset_path("writer_table_pandas")
@@ -171,6 +186,17 @@ def test_write_roi_normalizes_integer_axis_without_squeezing():
         assert report.shape == (1, 1, 1, 2, 2)
         assert roi.shape == (1, 1, 1, 2, 2)
         assert ds.root["0"]["rois"]["roi"].attrs["microio"]["slices"]["t"]["indexed"] is True
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_write_roi_rejects_step_downsampling_as_not_implemented():
+    dataset = _fresh_dataset_path("writer_roi_step")
+    try:
+        _create_writable_dataset(dataset)
+        ds = open_dataset(dataset, mode="a")
+        with pytest.raises(NotImplementedError, match="not implemented"):
+            ds.write_roi("0", "roi", {"y": slice(0, 4, 2)})
     finally:
         shutil.rmtree(dataset, ignore_errors=True)
 
@@ -288,6 +314,58 @@ def test_write_label_timepoint_initializes_array_with_single_timepoint_chunks():
         shutil.rmtree(dataset, ignore_errors=True)
 
 
+def test_write_label_timepoint_warns_when_source_chunks_span_multiple_frames(caplog):
+    dataset = _fresh_dataset_path("writer_label_timepoint_warn")
+    try:
+        root = zarr.open(dataset, mode="w", zarr_format=3)
+        scene = root.create_group("0")
+        scene.attrs["ome"] = {
+            "version": "0.5",
+            "multiscales": [
+                {
+                    "name": "scene",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space", "unit": "micrometer"},
+                        {"name": "y", "type": "space", "unit": "micrometer"},
+                        {"name": "x", "type": "space", "unit": "micrometer"},
+                    ],
+                    "datasets": [
+                        {
+                            "path": "0",
+                            "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0, 1.0]}],
+                        }
+                    ],
+                }
+            ],
+        }
+        scene.create_array(
+            "0",
+            shape=(4, 1, 1, 8, 8),
+            dtype=np.uint16,
+            chunks=(2, 1, 1, 4, 4),
+            dimension_names=("t", "c", "z", "y", "x"),
+            write_data=False,
+        )
+        ome = root.create_group("OME")
+        ome.attrs["ome"] = {"version": "0.5", "series": ["0"]}
+        (dataset / "OME" / "METADATA.ome.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?><OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image Name="scene"><Pixels SizeT="4" SizeC="1" SizeZ="1" SizeY="8" SizeX="8"/></Image></OME>',
+            encoding="utf-8",
+        )
+
+        ds = open_dataset(dataset, mode="a")
+        frame = np.zeros((1, 1, 1, 8, 8), dtype=np.uint16)
+        caplog.set_level("WARNING", logger="microio.writer.images")
+        ds.write_label_timepoint("0", "mask", frame, timepoint=0)
+
+        assert "time chunks spanning 2 frames" in caplog.text
+        assert tuple(int(chunk) for chunk in ds.root["0"]["labels"]["mask"]["0"].chunks) == (2, 1, 1, 4, 4)
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
 def test_write_label_image_creates_label_listing_and_multiscale_levels():
     dataset = _fresh_dataset_path("writer_label_multiscale")
     try:
@@ -356,6 +434,21 @@ def test_overwrite_guards_apply_to_tables_labels_and_rois():
             ds.write_label_image("0", "mask", np.zeros((1, 1, 1, 4, 4), dtype=np.uint16))
         with pytest.raises(FileExistsError):
             ds.write_roi("0", "roi", {"y": (0, 2), "x": (0, 2)})
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_write_methods_reject_invalid_names():
+    dataset = _fresh_dataset_path("writer_invalid_names")
+    try:
+        _create_writable_dataset(dataset)
+        ds = open_dataset(dataset, mode="a")
+        with pytest.raises(ValueError, match="path separators"):
+            ds.write_table("0", "bad/name", {"a": [1]})
+        with pytest.raises(ValueError, match="whitespace-only"):
+            ds.write_label_image("0", "   ", np.zeros((1, 1, 1, 4, 4), dtype=np.uint16))
+        with pytest.raises(ValueError, match="may not be '.' or '..'"):
+            ds.write_roi("0", "..", {"y": (0, 2), "x": (0, 2)})
     finally:
         shutil.rmtree(dataset, ignore_errors=True)
 

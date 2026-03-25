@@ -18,7 +18,7 @@ pip install git+https://github.com/TStanC/microio.git
 - Resolves scenes by canonical id, dataset index, or unique scene name
 - Reads root, scene, multiscale, and OME-XML metadata
 - Validates multiscale axis metadata and level-to-array consistency
-- Exposes image levels as lazy Dask arrays, raw Zarr arrays, or eager NumPy arrays
+- Exposes scene and label levels as lazy Dask arrays, raw Zarr arrays, or eager NumPy arrays
 - Builds and loads per-plane coordinate tables from OME plane metadata
 - Repairs placeholder `z` metadata when stronger OME evidence exists
 - Writes scene-local tables, NGFF label images, timepoint-scoped label updates, and single-scale ROI cutouts
@@ -46,10 +46,16 @@ root_md = ds.read_root_metadata()
 scene_md = ds.read_scene_metadata(scene.id)
 ome_scene = ds.read_scene_ome_metadata(scene.id)
 levels = ds.list_levels(scene.id)
+labels = ds.list_labels(scene.id)
 
 level1 = ds.read_level(scene.id, 1)
 level1_zarr = ds.read_level_zarr(scene.id, 1)
 level1_numpy = ds.read_level_numpy(scene.id, 1)
+
+if labels:
+    label = ds.get_label(scene.id, labels[0])
+    label_md = label.metadata()
+    label_level0 = label.array(0)
 ```
 
 ## Repair And Plane Tables
@@ -59,8 +65,8 @@ from microio import open_dataset
 
 ds = open_dataset("path/to/dataset.zarr", mode="a")
 
-table, table_report = ds.ensure_plane_table("0")
-repair_report = ds.repair_axis_metadata("0", persist=True)
+table, table_report = ds.ensure_plane_table("0", filetype="vsi")
+repair_report = ds.repair_axis_metadata("0", persist=True, filetype="vsi")
 
 print(table_report.row_count, table_report.persisted)
 print(repair_report.axis_states["z"])
@@ -127,7 +133,7 @@ microio inspect --input path/to/dataset.zarr --log-level INFO
 Repair scene metadata and optionally persist plane tables:
 
 ```bash
-microio repair --input path/to/dataset.zarr --scene 0 --persist-table --persist --log-level DEBUG
+microio repair --input path/to/dataset.zarr --scene 0 --filetype vsi --persist-table --persist --log-level DEBUG
 ```
 
 ## Main API Surface
@@ -137,9 +143,11 @@ microio repair --input path/to/dataset.zarr --scene 0 --persist-table --persist 
 - `DatasetHandle.read_root_metadata()`, `read_scene_metadata()`, `read_multiscale_metadata()`
 - `DatasetHandle.read_scene_ome_metadata()`, `read_original_metadata()`
 - `DatasetHandle.list_levels()`, `level_ref()`, `read_level()`, `read_level_zarr()`, `read_level_numpy()`
+- `DatasetHandle.list_labels()`, `get_label()`, `read_label_metadata()`, `list_label_levels()`
+- `DatasetHandle.label_level_ref()`, `read_label()`, `read_label_zarr()`, `read_label_numpy()`
 - `DatasetHandle.validate_scene_data_flow()`
-- `DatasetHandle.build_plane_table()`, `ensure_plane_table()`, `load_plane_table()`
-- `DatasetHandle.inspect_axis_metadata()`, `repair_axis_metadata()`
+- `DatasetHandle.build_plane_table()`, `ensure_plane_table()`, `load_table()`
+- `DatasetHandle.inspect_axis_metadata()`, `repair_axis_metadata()`, `list_rois()`, `load_roi()`
 - `DatasetHandle.write_table()`, `write_label_image()`, `write_label_timepoint()`, `write_roi()`
 
 For implementation details, consult the package docstrings or DeepWiki.

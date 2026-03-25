@@ -94,20 +94,22 @@ def _cmd_repair(args) -> int:
     ds = open_dataset(args.input, mode="a" if args.persist or args.persist_table else "r")
     scene_ids = args.scene or ds.list_scenes()
     logger.info(
-        "Running repair for %s on %d scene(s) (persist=%s persist_table=%s)",
+        "Running repair for %s on %d scene(s) (persist=%s persist_table=%s filetype=%s)",
         args.input,
         len(scene_ids),
         args.persist,
         args.persist_table,
+        args.filetype,
     )
     payload = {"path": str(ds.path), "scenes": {}}
     for scene_id in scene_ids:
         if args.persist_table:
-            _, table_report = ds.ensure_plane_table(scene_id, rebuild=args.rebuild_table)
+            _, table_report = ds.ensure_plane_table(scene_id, rebuild=args.rebuild_table, filetype=args.filetype)
         else:
-            _, table_report = ds.build_plane_table(scene_id, persist=False)
-        repair_report = ds.repair_axis_metadata(scene_id, persist=args.persist)
+            _, table_report = ds.build_plane_table(scene_id, persist=False, filetype=args.filetype)
+        repair_report = ds.repair_axis_metadata(scene_id, persist=args.persist, filetype=args.filetype)
         payload["scenes"][scene_id] = {
+            "filetype": args.filetype or "generic",
             "table": {
                 "row_count": table_report.row_count,
                 "persisted": table_report.persisted,
@@ -177,6 +179,7 @@ def main() -> int:
     p_repair.add_argument("--persist", action="store_true")
     p_repair.add_argument("--persist-table", action="store_true")
     p_repair.add_argument("--rebuild-table", action="store_true")
+    p_repair.add_argument("--filetype", choices=["generic", "vsi"], default="generic")
     p_repair.add_argument("--log-level", default="INFO")
     p_repair.set_defaults(func=_cmd_repair)
 

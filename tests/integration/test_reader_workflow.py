@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 from microio.reader.open import open_dataset
 
 
@@ -50,10 +52,20 @@ def test_ensure_plane_table_is_idempotent(vsi_subset):
     assert len(table["the_z"]) == 3400
 
 
+def test_vsi_filetype_gates_numbered_time_metadata(vsi_subset):
+    ds = open_dataset(vsi_subset, mode="a")
+
+    generic_table, _ = ds.build_plane_table("0", persist=False)
+    vsi_table, _ = ds.build_plane_table("0", persist=False, filetype="vsi")
+
+    assert np.isnan(generic_table["positioners_t"]).all()
+    assert np.isfinite(vsi_table["positioners_t"]).all()
+
+
 def test_lif_repair_updates_channel_windows_to_dtype_bounds(lif_subset):
     ds = open_dataset(lif_subset, mode="a")
-    repair = ds.repair_axis_metadata("14", persist=True)
-    channels = ds.read_scene_metadata("14", corrected=False)["omero"]["channels"]
+    repair = ds.repair_axis_metadata("15", persist=True)
+    channels = ds.read_scene_metadata("15", corrected=False)["omero"]["channels"]
 
     assert repair.persisted is True
     assert len(channels) == 3

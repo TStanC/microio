@@ -117,6 +117,18 @@ def require_child_group(parent, name: str):
     return parent.create_group(name)
 
 
+def validate_write_target_name(name: str, *, kind: str) -> str:
+    """Validate a scene-local writer target name without normalizing it."""
+    text = str(name)
+    if not text or not text.strip():
+        raise ValueError(f"{kind} names must be non-empty and not whitespace-only")
+    if text in {".", ".."}:
+        raise ValueError(f"{kind} names may not be '.' or '..'")
+    if "/" in text or "\\" in text:
+        raise ValueError(f"{kind} names may not contain path separators")
+    return text
+
+
 def coerce_array(data: Any):
     """Normalize array-like input into Dask or NumPy form.
 

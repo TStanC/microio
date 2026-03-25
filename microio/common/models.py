@@ -115,12 +115,16 @@ class SceneRef:
 
 @dataclass(frozen=True)
 class LevelRef:
-    """Validated multiscale level description for one scene.
+    """Validated multiscale level description for one image-like container.
 
     Attributes
     ----------
     scene_id:
-        Canonical scene id that owns the level.
+        Canonical scene id that owns the container.
+    container_kind:
+        Container type, for example ``"scene"`` or ``"label"``.
+    container_name:
+        Optional container-local name such as a label name.
     level_index:
         Zero-based multiscale level index.
     path:
@@ -145,6 +149,8 @@ class LevelRef:
     scale: tuple[float, ...]
     axis_names: tuple[str, ...]
     axis_units: tuple[str | None, ...]
+    container_kind: str = "scene"
+    container_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -302,6 +308,74 @@ class RoiWriteReport:
 
 
 @dataclass
+class RoiReadResult:
+    """Result of loading one persisted ROI image group.
+
+    Attributes
+    ----------
+    scene_id:
+        Canonical scene id that owns the ROI group.
+    roi_name:
+        Scene-local ROI name under ``rois/``.
+    level_path:
+        Stored array path inside the ROI group. Current ROI writes use only
+        the single-scale path ``"0"``.
+    shape:
+        Materialized ROI array shape.
+    array:
+        Eager NumPy array payload loaded from the ROI group.
+    attrs:
+        Flattened ROI group attrs.
+    microio:
+        Stored microio provenance block from the ROI group attrs.
+    ome:
+        Semantic OME metadata projected from the ROI attrs.
+    """
+
+    scene_id: str
+    roi_name: str
+    level_path: str
+    shape: tuple[int, ...]
+    array: Any
+    attrs: dict[str, Any]
+    microio: dict[str, Any]
+    ome: dict[str, Any]
+
+
+@dataclass
+class LabelReadResult:
+    """Metadata view for one persisted label image group.
+
+    Attributes
+    ----------
+    scene_id:
+        Canonical scene id that owns the label image.
+    label_name:
+        Scene-local label name under ``labels/``.
+    attrs:
+        Flattened label-group attrs with the validated primary multiscales
+        block projected back into ``attrs["multiscales"]``.
+    microio:
+        Stored microio label metadata such as source scene linkage, write mode,
+        and written timepoints.
+    ome:
+        Semantic OME metadata projected from the label-group attrs.
+    group_attrs:
+        Raw flattened attrs from the label group.
+    labels_group_attrs:
+        Flattened attrs from the parent ``labels/`` container group.
+    """
+
+    scene_id: str
+    label_name: str
+    attrs: dict[str, Any]
+    microio: dict[str, Any]
+    ome: dict[str, Any]
+    group_attrs: dict[str, Any]
+    labels_group_attrs: dict[str, Any]
+
+
+@dataclass
 class DataFlowReport:
     """Consistency report for scene identity, metadata, and array access."""
 
@@ -311,28 +385,64 @@ class DataFlowReport:
     errors: list[ValidationMessage] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class SceneAccessor:
-    """Convenience wrapper for one resolved scene.
+class _MultiscaleAccessorMixin:
+    """Shared access methods for multiscale image-like containers.
 
-    The accessor keeps a resolved :class:`SceneRef` together with its parent
-    dataset handle and forwards common read operations to dataset-level APIs.
-    It is primarily ergonomic sugar over ``DatasetHandle`` when the scene
-    selector is already known.
+    Subclasses provide the container-specific metadata and level-resolution
+    hooks while this mixin exposes the public read surface shared by scenes and
+    label images.
     """
+
+    dataset: "DatasetHandle"
+
+    def _metadata(self) -> dict:
+        raise NotImplementedError
+
+    def _levels(self) -> list[LevelRef]:
+        raise NotImplementedError
+
+    def _level(self, level: int | str = 0) -> LevelRef:
+        raise NotImplementedError
+
+    def _array(self, level: int | str = 0):
+        raise NotImplementedError
+
+    def _zarr_array(self, level: int | str = 0):
+        raise NotImplementedError
+
+    def _numpy_array(self, level: int | str = 0):
+        raise NotImplementedError
+
+    def levels(self) -> list[LevelRef]:
+        """Return validated multiscale levels for this container."""
+        return self._levels()
+
+    def level(self, level: int | str = 0) -> LevelRef:
+        """Resolve one level by index or path."""
+        return self._level(level)
+
+    def array(self, level: int | str = 0):
+        """Return one level as a lazy Dask array."""
+        return self._array(level)
+
+    def zarr_array(self, level: int | str = 0):
+        """Return one level as the underlying Zarr array."""
+        return self._zarr_array(level)
+
+    def numpy_array(self, level: int | str = 0):
+        """Return one level eagerly materialized as a NumPy array."""
+        return self._numpy_array(level)
+
+
+@dataclass(frozen=True)
+class SceneAccessor(_MultiscaleAccessorMixin):
+    """Convenience wrapper for one resolved scene."""
 
     dataset: "DatasetHandle"
     ref: SceneRef
 
     def metadata(self, *, corrected: bool = True) -> dict:
-        """Return scene attributes for this accessor's scene.
-
-        Parameters
-        ----------
-        corrected:
-            If ``True``, overlay persisted microio repairs onto the returned
-            semantic metadata view.
-        """
+        """Return scene attributes for this accessor's scene."""
         return self.dataset.read_scene_metadata(self.ref.id, corrected=corrected)
 
     def multiscale_metadata(self) -> dict:
@@ -343,34 +453,54 @@ class SceneAccessor:
         """Return normalized OME metadata for this scene."""
         return self.dataset.read_scene_ome_metadata(self.ref.id)
 
-    def levels(self) -> list[LevelRef]:
-        """Return validated multiscale levels for this scene."""
+    def _metadata(self) -> dict:
+        return self.metadata()
+
+    def _levels(self) -> list[LevelRef]:
         return self.dataset.list_levels(self.ref.id)
 
-    def level(self, level: int | str = 0) -> LevelRef:
-        """Resolve one level by index or path for this scene.
-
-        Examples
-        --------
-        ``scene.level(0)`` resolves the finest level, while
-        ``scene.level("1")`` resolves the level stored under path ``"1"``.
-        """
+    def _level(self, level: int | str = 0) -> LevelRef:
         return self.dataset.level_ref(self.ref.id, level)
 
-    def array(self, level: int | str = 0):
-        """Return one level as a lazy Dask array."""
+    def _array(self, level: int | str = 0):
         return self.dataset.read_level(self.ref.id, level)
 
-    def zarr_array(self, level: int | str = 0):
-        """Return one level as the underlying Zarr array."""
+    def _zarr_array(self, level: int | str = 0):
         return self.dataset.read_level_zarr(self.ref.id, level)
 
-    def numpy_array(self, level: int | str = 0):
-        """Return one level eagerly materialized as a NumPy array.
-
-        Unlike :meth:`array`, this reads the full level into memory.
-        """
+    def _numpy_array(self, level: int | str = 0):
         return self.dataset.read_level_numpy(self.ref.id, level)
+
+
+@dataclass(frozen=True)
+class LabelAccessor(_MultiscaleAccessorMixin):
+    """Convenience wrapper for one resolved label image."""
+
+    dataset: "DatasetHandle"
+    scene_ref: SceneRef
+    name: str
+
+    def metadata(self) -> LabelReadResult:
+        """Return metadata for this accessor's label image."""
+        return self.dataset.read_label_metadata(self.scene_ref.id, self.name)
+
+    def _metadata(self) -> dict:
+        return self.metadata().attrs
+
+    def _levels(self) -> list[LevelRef]:
+        return self.dataset.list_label_levels(self.scene_ref.id, self.name)
+
+    def _level(self, level: int | str = 0) -> LevelRef:
+        return self.dataset.label_level_ref(self.scene_ref.id, self.name, level)
+
+    def _array(self, level: int | str = 0):
+        return self.dataset.read_label(self.scene_ref.id, self.name, level)
+
+    def _zarr_array(self, level: int | str = 0):
+        return self.dataset.read_label_zarr(self.scene_ref.id, self.name, level)
+
+    def _numpy_array(self, level: int | str = 0):
+        return self.dataset.read_label_numpy(self.scene_ref.id, self.name, level)
 
 
 @dataclass
@@ -397,8 +527,9 @@ class DatasetHandle:
     path: Path
     root: Any
     mode: str = "r"
+    ome_scene_map: dict[str, int] | None = None
     _scene_refs_cache: list[SceneRef] | None = field(default=None, init=False, repr=False)
-    _level_refs_cache: dict[str, list[LevelRef]] = field(default_factory=dict, init=False, repr=False)
+    _level_refs_cache: dict[tuple[str, ...], list[LevelRef]] = field(default_factory=dict, init=False, repr=False)
     _raw_scene_metadata_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _ome_document_cache: Any | None = field(default=None, init=False, repr=False)
 
@@ -417,7 +548,9 @@ class DatasetHandle:
             self._level_refs_cache.clear()
             self._raw_scene_metadata_cache.clear()
         else:
-            self._level_refs_cache.pop(str(scene_id), None)
+            scene_key = str(scene_id)
+            for key in [item for item in self._level_refs_cache if scene_key in item]:
+                self._level_refs_cache.pop(key, None)
             self._raw_scene_metadata_cache.pop(str(scene_id), None)
 
     def list_scene_refs(self) -> list[SceneRef]:
@@ -449,6 +582,11 @@ class DatasetHandle:
         """Return a convenience accessor bound to one resolved scene."""
         ref = self.scene_ref(scene)
         return SceneAccessor(dataset=self, ref=ref)
+
+    def get_label(self, scene: int | str, name: str) -> LabelAccessor:
+        """Return a convenience accessor bound to one resolved label image."""
+        ref = self.scene_ref(scene)
+        return LabelAccessor(dataset=self, scene_ref=ref, name=str(name))
 
     def classify_scene_reference(self, value: int | str) -> str:
         """Classify a candidate scene selector without raising on misses."""
@@ -575,13 +713,19 @@ class DatasetHandle:
 
         return validate_scene_data_flow(self, scene)
 
-    def inspect_axis_metadata(self, scene: int | str) -> RepairReport:
+    def inspect_axis_metadata(self, scene: int | str, *, filetype: str | None = None) -> RepairReport:
         """Inspect axis metadata for one scene without mutating the dataset."""
         from microio.reader.repair import inspect_axis_metadata
 
-        return inspect_axis_metadata(self, scene)
+        return inspect_axis_metadata(self, scene, filetype=filetype)
 
-    def repair_axis_metadata(self, scene: int | str, *, persist: bool = True) -> RepairReport:
+    def repair_axis_metadata(
+        self,
+        scene: int | str,
+        *,
+        persist: bool = True,
+        filetype: str | None = None,
+    ) -> RepairReport:
         """Repair trustworthy axis and channel-window metadata for one scene.
 
         Parameters
@@ -594,17 +738,18 @@ class DatasetHandle:
         """
         from microio.reader.repair import repair_axis_metadata
 
-        return repair_axis_metadata(self, scene, persist=persist)
+        return repair_axis_metadata(self, scene, persist=persist, filetype=filetype)
 
-    def load_plane_table(self, scene: int | str, table_name: str = "axes_trajectory") -> dict[str, Any]:
-        """Load a persisted plane table into eager NumPy columns.
+    def load_table(self, scene: int | str, table_name: str = "axes_trajectory") -> dict[str, Any]:
+        """Load a persisted scene-local table into eager NumPy columns.
 
-        The default table stores one row per ``(t, c, z)`` plane with columns
-        such as ``the_t``, ``the_c``, ``the_z``, and ``positioners_z``.
+        The default ``axes_trajectory`` table stores one row per ``(t, c, z)``
+        plane with columns such as ``the_t``, ``the_c``, ``the_z``, and
+        ``positioners_z``.
         """
-        from microio.reader.tables import load_plane_table
+        from microio.reader.tables import load_table
 
-        return load_plane_table(self, scene, table_name=table_name)
+        return load_table(self, scene, table_name=table_name)
 
     def build_plane_table(
         self,
@@ -612,11 +757,12 @@ class DatasetHandle:
         *,
         table_name: str = "axes_trajectory",
         persist: bool = False,
+        filetype: str | None = None,
     ) -> tuple[dict[str, Any], PlaneTableReport]:
         """Build a plane table from OME metadata, optionally persisting it."""
         from microio.reader.tables import build_plane_table
 
-        return build_plane_table(self, scene, table_name=table_name, persist=persist)
+        return build_plane_table(self, scene, table_name=table_name, persist=persist, filetype=filetype)
 
     def ensure_plane_table(
         self,
@@ -624,11 +770,12 @@ class DatasetHandle:
         *,
         table_name: str = "axes_trajectory",
         rebuild: bool = False,
+        filetype: str | None = None,
     ) -> tuple[dict[str, Any], PlaneTableReport]:
         """Load a compatible plane table or rebuild it when required."""
         from microio.reader.tables import ensure_plane_table
 
-        return ensure_plane_table(self, scene, table_name=table_name, rebuild=rebuild)
+        return ensure_plane_table(self, scene, table_name=table_name, rebuild=rebuild, filetype=filetype)
 
     def read_table_metadata(self, scene: int | str, table_name: str = "axes_trajectory") -> dict:
         """Read stored metadata attrs for one scene-local table."""
@@ -641,6 +788,66 @@ class DatasetHandle:
         from microio.reader.extras import read_microio_extras
 
         return read_microio_extras(self, scene)
+
+    def list_rois(self, scene: int | str) -> list[str]:
+        """List scene-local ROI image names."""
+        from microio.reader.rois import list_rois
+
+        return list_rois(self, scene)
+
+    def read_roi_metadata(self, scene: int | str, name: str) -> dict[str, Any]:
+        """Read metadata for one ROI image group without loading its array."""
+        from microio.reader.rois import read_roi_metadata
+
+        return read_roi_metadata(self, scene, name)
+
+    def load_roi(self, scene: int | str, name: str) -> RoiReadResult:
+        """Load one ROI image group together with its provenance metadata."""
+        from microio.reader.rois import load_roi
+
+        return load_roi(self, scene, name)
+
+    def list_labels(self, scene: int | str) -> list[str]:
+        """List scene-local label image names."""
+        from microio.reader.labels import list_labels
+
+        return list_labels(self, scene)
+
+    def read_label_metadata(self, scene: int | str, name: str) -> LabelReadResult:
+        """Read metadata for one label image group without loading its arrays."""
+        from microio.reader.labels import read_label_metadata
+
+        return read_label_metadata(self, scene, name)
+
+    def list_label_levels(self, scene: int | str, name: str) -> list[LevelRef]:
+        """Return validated multiscale levels for one label image."""
+        from microio.reader.labels import list_label_levels
+
+        return list_label_levels(self, scene, name)
+
+    def label_level_ref(self, scene: int | str, name: str, level: int | str) -> LevelRef:
+        """Resolve one label-image level by index or path."""
+        from microio.reader.labels import label_level_ref
+
+        return label_level_ref(self, scene, name, level)
+
+    def read_label(self, scene: int | str, name: str, level: int | str = 0):
+        """Return one label-image level as a lazy Dask array."""
+        from microio.reader.labels import read_label
+
+        return read_label(self, scene, name, level)
+
+    def read_label_zarr(self, scene: int | str, name: str, level: int | str = 0):
+        """Return one label-image level as the underlying Zarr array."""
+        from microio.reader.labels import read_label_zarr
+
+        return read_label_zarr(self, scene, name, level)
+
+    def read_label_numpy(self, scene: int | str, name: str, level: int | str = 0):
+        """Return one label-image level eagerly materialized as a NumPy array."""
+        from microio.reader.labels import read_label_numpy
+
+        return read_label_numpy(self, scene, name, level)
 
     def write_table(
         self,
