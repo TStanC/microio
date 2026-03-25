@@ -18,6 +18,30 @@ from microio.reader.timing import resolve_plane_time_source
 logger = logging.getLogger("microio.reader.tables")
 
 
+def list_tables(ds, scene_id: int | str) -> list[str]:
+    """List persisted scene-local table names.
+
+    Parameters
+    ----------
+    ds:
+        Open dataset handle.
+    scene_id:
+        Scene selector accepted by :meth:`DatasetHandle.scene_ref`.
+
+    Returns
+    -------
+    list[str]
+        Table names under the scene-local ``tables/`` group, or an empty list
+        when the scene has no tables group.
+    """
+    ref = ds.scene_ref(scene_id)
+    logger.debug("Listing tables for scene %s", ref.id)
+    tables = ds.root[ref.id].get("tables")
+    if tables is None:
+        return []
+    return [str(name) for name in tables.keys()]
+
+
 def load_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> dict[str, np.ndarray]:
     """Load one persisted scene-local table into eager NumPy column arrays.
 

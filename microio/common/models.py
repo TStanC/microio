@@ -751,6 +751,12 @@ class DatasetHandle:
 
         return load_table(self, scene, table_name=table_name)
 
+    def list_tables(self, scene: int | str) -> list[str]:
+        """List persisted scene-local table names."""
+        from microio.reader.tables import list_tables
+
+        return list_tables(self, scene)
+
     def build_plane_table(
         self,
         scene: int | str,

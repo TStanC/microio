@@ -258,6 +258,33 @@ def test_data_flow_reports_ome_shape_mismatch():
             shutil.rmtree(dataset, ignore_errors=True)
 
 
+def test_list_tables_returns_empty_without_tables_group():
+    dataset = _fresh_dataset_path("no_tables_group")
+    try:
+        _create_minimal_dataset(dataset, include_level_one=False)
+        ds = open_dataset(dataset)
+        assert ds.list_tables("0") == []
+    finally:
+        if dataset.exists():
+            shutil.rmtree(dataset, ignore_errors=True)
+
+
+def test_list_tables_returns_scene_local_table_names():
+    dataset = _fresh_dataset_path("tables_group_present")
+    try:
+        _create_minimal_dataset(dataset, include_level_one=False)
+        root = zarr.open(dataset, mode="a")
+        tables = root["0"].create_group("tables")
+        tables.create_group("axes_trajectory")
+        tables.create_group("measurements")
+
+        ds = open_dataset(dataset)
+        assert set(ds.list_tables("0")) == {"axes_trajectory", "measurements"}
+    finally:
+        if dataset.exists():
+            shutil.rmtree(dataset, ignore_errors=True)
+
+
 def _create_minimal_dataset(
     path: Path,
     *,
