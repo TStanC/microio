@@ -1,5 +1,7 @@
 # microio
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/TStanC/microio)
+
 `microio` is a reader-first microscopy I/O library for inspecting and enriching
 existing bioformats2raw-style OME-Zarr datasets on disk.
 
@@ -153,5 +155,3 @@ microio repair --input path/to/dataset.zarr --scene 0 --filetype vsi --persist-t
 For implementation details, consult the package docstrings or DeepWiki.
 
 This library was created with the help of OpenAIs CODEX agent.
-
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/TStanC/microio)
