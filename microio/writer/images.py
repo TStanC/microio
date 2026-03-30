@@ -494,6 +494,7 @@ def _prepare_label_group(
     labels = require_child_group(ds.root[scene_id], "labels")
     initialized = False
     label_group = labels[name] if name in labels else None
+    _reject_read_only_workspace_label(label_group)
     if label_group is not None and overwrite:
         ensure_group_absent_or_overwrite(labels, name, overwrite=True)
         label_group = None
@@ -582,6 +583,18 @@ def _validate_existing_label_group(label_group, level_shapes: dict[str, tuple[in
             raise ValueError(f"Existing label level {path!r} shape {array.shape} does not match expected {shape}")
         if np.dtype(array.dtype) != dtype_obj:
             raise ValueError(f"Existing label dtype {array.dtype} does not match incoming dtype {dtype_obj}")
+
+
+def _reject_read_only_workspace_label(label_group) -> None:
+    """Reject writes that target carried read-only workspace label copies."""
+    if label_group is None:
+        return
+    microio = label_group.attrs.asdict().get("microio", {})
+    workspace = microio.get("workspace", {})
+    if workspace.get("read_only") or workspace.get("carried_from_source"):
+        raise PermissionError(
+            f"{label_group.path} is a carried read-only workspace label and cannot be modified in place."
+        )
 
 
 def _label_level_shapes(ds, scene_id: str, label_shape: tuple[int, ...], source_datasets: list[dict[str, Any]]) -> dict[str, tuple[int, ...]]:

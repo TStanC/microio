@@ -307,6 +307,23 @@ class RoiWriteReport:
     persisted: bool
 
 
+@dataclass(frozen=True)
+class WorkspaceHandle:
+    """Resolved metadata for one microio computation workspace."""
+
+    workspace_path: Path
+    source_dataset_path: Path
+    source_scene_id: str
+    source_level: str
+    source_level_path: str
+    source_level_shape: tuple[int, ...]
+    source_level_scale: tuple[float, ...]
+    chunks: tuple[int, ...]
+    carried_labels: tuple[str, ...] = ()
+    source_scene_name: str | None = None
+    created_at: str | None = None
+
+
 @dataclass
 class RoiReadResult:
     """Result of loading one persisted ROI image group.
@@ -997,4 +1014,101 @@ class DatasetHandle:
             attrs=attrs,
             overwrite=overwrite,
             threads=threads,
+        )
+
+    def create_workspace(
+        self,
+        destination: str | Path,
+        scene: int | str,
+        *,
+        source_level: int | str = 0,
+        chunks: tuple[int, ...] | None = None,
+        labels: list[str] | None = None,
+        overwrite: bool = False,
+        threads: int | None = None,
+    ) -> WorkspaceHandle:
+        """Create a computation workspace derived from one source scene."""
+        from microio.workspace import create_workspace
+
+        return create_workspace(
+            self,
+            destination,
+            scene,
+            source_level=source_level,
+            chunks=chunks,
+            labels=labels,
+            overwrite=overwrite,
+            threads=threads,
+        )
+
+    def open_workspace(self) -> WorkspaceHandle:
+        """Interpret this dataset handle as a microio computation workspace."""
+        from microio.workspace import open_workspace
+
+        return open_workspace(self)
+
+    def delete_workspace(self) -> Path:
+        """Delete the current computation workspace after provenance validation."""
+        from microio.workspace import delete_workspace
+
+        return delete_workspace(self)
+
+    def commit_workspace_labels(
+        self,
+        name: str,
+        data: Any | None = None,
+        *,
+        workspace_label: str | None = None,
+        chunks: tuple[int, ...] | None = None,
+        dtype: Any | None = None,
+        attrs: dict[str, Any] | None = None,
+        colors: list[dict[str, Any]] | None = None,
+        properties: list[dict[str, Any]] | None = None,
+        overwrite: bool = False,
+        timepoint: int | None = None,
+        overwrite_timepoint: bool = False,
+        threads: int | None = None,
+    ) -> LabelWriteReport:
+        """Commit a computed label image from this workspace back to the source dataset."""
+        from microio.workspace import commit_workspace_labels
+
+        return commit_workspace_labels(
+            self,
+            name,
+            data,
+            workspace_label=workspace_label,
+            chunks=chunks,
+            dtype=dtype,
+            attrs=attrs,
+            colors=colors,
+            properties=properties,
+            overwrite=overwrite,
+            timepoint=timepoint,
+            overwrite_timepoint=overwrite_timepoint,
+            threads=threads,
+        )
+
+    def commit_workspace_table(
+        self,
+        name: str,
+        data: Any | None = None,
+        *,
+        workspace_table: str | None = None,
+        attrs: dict[str, Any] | None = None,
+        overwrite: bool = False,
+        append: bool = False,
+        chunk_length: int | None = None,
+    ) -> TableWriteReport:
+        """Commit a table from this workspace back to the source dataset."""
+        from microio.workspace import commit_workspace_table
+
+        return commit_workspace_table(
+            self,
+            name,
+            data,
+            workspace_table=workspace_table,
+            attrs=attrs,
+            overwrite=overwrite,
+            append=append,
+            chunk_length=chunk_length,
         )

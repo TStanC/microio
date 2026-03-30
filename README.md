@@ -24,6 +24,7 @@ pip install git+https://github.com/TStanC/microio.git
 - Builds and loads per-plane coordinate tables from OME plane metadata
 - Repairs placeholder `z` metadata when stronger OME evidence exists
 - Writes scene-local tables, NGFF label images, timepoint-scoped label updates, and single-scale ROI cutouts
+- Creates computation workspaces as sibling OME-Zarr stores with rechunked image data and optional read-only label carryover
 
 ## Safety Boundaries
 
@@ -37,6 +38,8 @@ pip install git+https://github.com/TStanC/microio.git
 ## Quick Start
 
 ```python
+import numpy as np
+
 from microio import open_dataset
 
 ds = open_dataset("path/to/dataset.zarr")
@@ -63,6 +66,8 @@ if labels:
 ## Repair And Plane Tables
 
 ```python
+import numpy as np
+
 from microio import open_dataset
 
 ds = open_dataset("path/to/dataset.zarr", mode="a")
@@ -124,6 +129,40 @@ Notes:
 - Label-image channel size may match the source image channel size or use `1` when one label volume applies to all source channels
 - `write_roi()` is a microio extension for single-scale cutouts and is not stored as an NGFF label image
 
+## Computation Workspaces
+
+```python
+from microio import open_dataset
+
+ds = open_dataset("path/to/dataset.zarr", mode="a")
+workspace = ds.create_workspace(
+    "path/to/dataset.workspace.zarr",
+    "0",
+    chunks=(1, 1, 16, 512, 512),
+    labels=["seed_labels"],
+)
+
+workspace_ds = open_dataset(workspace.workspace_path, mode="a")
+
+# carried labels remain readable but are marked read-only
+print(workspace_ds.list_labels("0"))
+
+# compute into the workspace, then commit back to the source dataset
+mask = np.zeros(workspace_ds.level_ref("0", 0).shape, dtype=np.uint16)
+mask[..., 10:20, 10:20] = 1
+workspace_ds.write_label_image("0", "computed_mask", mask)
+workspace_ds.commit_workspace_labels("segmentation", workspace_label="computed_mask")
+workspace_ds.delete_workspace()
+```
+
+Notes:
+
+- Workspaces are sibling `.zarr` stores, not in-scene temporary groups
+- The workspace image copies one selected source level into a single-scale, computation-friendly store
+- Existing source labels can be copied in as a selectable read-only subset for analysis
+- `commit_workspace_labels()` and `commit_workspace_table()` reuse the existing source-dataset writer pipeline
+- Carried source labels are explicitly marked read-only and cannot be committed as computed outputs
+
 ## CLI
 
 Inspect a dataset:
@@ -151,6 +190,7 @@ microio repair --input path/to/dataset.zarr --scene 0 --filetype vsi --persist-t
 - `DatasetHandle.build_plane_table()`, `ensure_plane_table()`, `load_table()`
 - `DatasetHandle.inspect_axis_metadata()`, `repair_axis_metadata()`, `list_rois()`, `load_roi()`
 - `DatasetHandle.write_table()`, `write_label_image()`, `write_label_timepoint()`, `write_roi()`
+- `DatasetHandle.create_workspace()`, `open_workspace()`, `commit_workspace_labels()`, `commit_workspace_table()`, `delete_workspace()`
 
 For implementation details, consult the package docstrings or DeepWiki.
 
