@@ -61,6 +61,7 @@ if labels:
     label = ds.get_label(scene.id, labels[0])
     label_md = label.metadata()
     label_level0 = label.array(0)
+    print(label_md.label_attrs, label_md.colors, label_md.properties)
 ```
 
 ## Repair And Plane Tables
@@ -125,6 +126,7 @@ Notes:
 - Write APIs are fail-safe by default and require `overwrite=True` to replace an existing target
 - `write_label_image()` writes integer label pyramids aligned to the source image pyramid
 - `write_label_timepoint()` initializes or reuses a label pyramid and writes one timepoint with caller-coordinated overwrite protection
+- `read_label_metadata()` exposes writer-style `label_attrs`, `colors`, and `properties` fields for symmetric metadata round-trips
 - Label-image user attrs are stored under `label_group.attrs["microio"]["label-attrs"]`
 - Label-image channel size may match the source image channel size or use `1` when one label volume applies to all source channels
 - `write_roi()` is a microio extension for single-scale cutouts and is not stored as an NGFF label image
@@ -150,7 +152,19 @@ print(workspace_ds.list_labels("0"))
 # compute into the workspace, then commit back to the source dataset
 mask = np.zeros(workspace_ds.level_ref("0", 0).shape, dtype=np.uint16)
 mask[..., 10:20, 10:20] = 1
-workspace_ds.write_label_image("0", "computed_mask", mask)
+workspace_ds.write_label_image(
+    "0",
+    "computed_mask",
+    mask,
+    attrs={"description": "Cellpose nuclei", "source_channel": 0},
+    colors=[
+        {"label-value": 0, "rgba": [0, 0, 0, 0]},
+        {"label-value": 1, "rgba": [0, 255, 0, 255]},
+    ],
+    properties=[
+        {"label-value": 1, "class": "nucleus"},
+    ],
+)
 workspace_ds.commit_workspace_labels("segmentation", workspace_label="computed_mask")
 workspace_ds.delete_workspace()
 ```
@@ -161,7 +175,11 @@ Notes:
 - The workspace image copies one selected source level into a single-scale, computation-friendly store
 - Existing source labels can be copied in as a selectable read-only subset for analysis
 - `commit_workspace_labels()` and `commit_workspace_table()` reuse the existing source-dataset writer pipeline
+- `commit_workspace_labels(..., workspace_label=...)` automatically reuses the workspace label's `label_attrs`, `colors`, and `properties` unless explicitly overridden
+- `commit_workspace_table(..., workspace_table=...)` automatically reuses the workspace table's logical user attrs unless explicitly overridden
 - Carried source labels are explicitly marked read-only and cannot be committed as computed outputs
+- `read_table()` exposes `table_attrs` in the same logical shape used by `write_table(..., attrs=...)`
+- `load_roi()` and `read_roi_metadata()` expose `roi_attrs` in the same logical shape used by `write_roi(..., attrs=...)`
 
 ## CLI
 
@@ -187,7 +205,7 @@ microio repair --input path/to/dataset.zarr --scene 0 --filetype vsi --persist-t
 - `DatasetHandle.list_labels()`, `get_label()`, `read_label_metadata()`, `list_label_levels()`
 - `DatasetHandle.label_level_ref()`, `read_label()`, `read_label_zarr()`, `read_label_numpy()`
 - `DatasetHandle.validate_scene_data_flow()`
-- `DatasetHandle.build_plane_table()`, `ensure_plane_table()`, `load_table()`
+- `DatasetHandle.build_plane_table()`, `ensure_plane_table()`, `load_table()`, `read_table()`
 - `DatasetHandle.inspect_axis_metadata()`, `repair_axis_metadata()`, `list_rois()`, `load_roi()`
 - `DatasetHandle.write_table()`, `write_label_image()`, `write_label_timepoint()`, `write_roi()`
 - `DatasetHandle.create_workspace()`, `open_workspace()`, `commit_workspace_labels()`, `commit_workspace_table()`, `delete_workspace()`
