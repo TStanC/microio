@@ -33,7 +33,12 @@ def list_labels(ds: DatasetHandle, scene: int | str) -> list[str]:
 
 
 def read_label_metadata(ds: DatasetHandle, scene: int | str, name: str) -> LabelReadResult:
-    """Read label-group metadata without loading image data."""
+    """Read label-group metadata without loading image data.
+
+    The returned :class:`LabelReadResult` preserves the raw metadata views
+    while also exposing the logical ``label_attrs``, ``colors``, and
+    ``properties`` fields corresponding to the label-writer API.
+    """
     ref = ds.scene_ref(scene)
     logger.debug("Reading label metadata for scene %s label %s", ref.id, name)
     labels_group = _labels_group(ds, ref.id)

@@ -91,8 +91,14 @@ def read_table_metadata(ds, scene_id: int | str, table_name: str = AXES_TRAJECTO
 
 
 def read_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> TableReadResult:
-    """Load one persisted scene-local table together with logical user attrs."""
+    """Load one persisted scene-local table together with logical user attrs.
+
+    This reader complements :func:`microio.writer.tables.write_table` by
+    returning both the eager table columns and the ``table_attrs`` block that
+    corresponds to the writer ``attrs=...`` payload.
+    """
     ref = ds.scene_ref(scene_id)
+    logger.debug("Reading table %s with logical attrs for scene %s", table_name, ref.id)
     data = load_table(ds, ref.id, table_name=table_name)
     attrs = read_table_metadata(ds, ref.id, table_name=table_name)
     table_attrs = _table_user_attrs(attrs)

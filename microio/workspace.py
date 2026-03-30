@@ -40,19 +40,35 @@ def create_workspace(
     overwrite: bool = False,
     threads: int | None = None,
 ) -> WorkspaceHandle:
-    """Create a single-scene computation workspace as a sibling Zarr store."""
+    """Create a single-scene computation workspace as a sibling Zarr store.
+
+    The workspace contains one selected source-scene image level copied into a
+    single-scale OME-Zarr scene with computation-friendly chunking. Existing
+    source labels may be carried into the workspace as a read-only subset for
+    analysis.
+    """
     ref = ds.scene_ref(scene)
     level = ds.level_ref(ref.id, source_level)
+    logger.info(
+        "Creating workspace %s from dataset=%s scene=%s level=%s overwrite=%s",
+        destination,
+        ds.path,
+        ref.id,
+        level.path,
+        overwrite,
+    )
     source = ds.read_level(ref.id, level.path)
     requested_labels = _normalize_workspace_labels(ds, ref.id, labels)
     destination_path = Path(destination)
     if destination_path.exists():
         if not overwrite:
             raise FileExistsError(f"Workspace path already exists: {destination_path}")
+        logger.info("Removing existing workspace destination %s before recreation", destination_path)
         shutil.rmtree(destination_path)
 
     zarr_format = node_zarr_format(ds.root)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.debug("Workspace %s will use zarr_format=%s carried_labels=%s", destination_path, zarr_format, requested_labels)
     root = zarr.open(destination_path, mode="w", zarr_format=zarr_format)
     _write_workspace_root_metadata(ds, root, ref.id, level, chunks=chunks, labels=requested_labels)
     _write_workspace_ome_group(ds, root, destination_path, ref.id)
@@ -60,11 +76,13 @@ def create_workspace(
     if requested_labels:
         _carry_labels(ds, root, ref.id, level.path, requested_labels, chunks=chunks, threads=threads)
     workspace_ds = open_dataset(destination_path, mode="a")
+    logger.info("Created workspace %s for source scene %s", destination_path, ref.id)
     return open_workspace(workspace_ds)
 
 
 def open_workspace(ds: DatasetHandle) -> WorkspaceHandle:
     """Validate that ``ds`` is a computation workspace and return its metadata."""
+    logger.debug("Opening workspace metadata from %s", ds.path)
     metadata = _workspace_metadata(ds.root)
     if metadata is None:
         raise ValueError(f"Dataset {ds.path} is not a microio computation workspace")
@@ -87,6 +105,7 @@ def delete_workspace(ds: DatasetHandle) -> Path:
     """Delete the current workspace after provenance validation."""
     workspace = open_workspace(ds)
     path = workspace.workspace_path
+    logger.info("Deleting workspace %s derived from %s", path, workspace.source_dataset_path)
     shutil.rmtree(path)
     return path
 
@@ -107,7 +126,12 @@ def commit_workspace_labels(
     overwrite_timepoint: bool = False,
     threads: int | None = None,
 ):
-    """Commit a computed label image from a workspace to its source dataset."""
+    """Commit a computed label image from a workspace to its source dataset.
+
+    When ``workspace_label`` is supplied and explicit metadata overrides are
+    omitted, the commit reuses the workspace label's logical ``label_attrs``,
+    ``colors``, and ``properties`` metadata.
+    """
     workspace = open_workspace(ds)
     if workspace.source_level != "0":
         raise ValueError(
@@ -117,6 +141,14 @@ def commit_workspace_labels(
 
     payload = data
     candidate = str(workspace_label or name)
+    logger.info(
+        "Committing workspace label %s to source dataset=%s scene=%s target=%s timepoint=%s",
+        candidate if workspace_label is not None else "<in-memory>",
+        workspace.source_dataset_path,
+        workspace.source_scene_id,
+        name,
+        timepoint,
+    )
     if payload is None:
         _ensure_workspace_label_can_commit(ds, workspace, candidate)
         payload = ds.read_label(workspace.source_scene_id, candidate, 0)
@@ -132,6 +164,13 @@ def commit_workspace_labels(
             resolved_colors = metadata.colors
         if resolved_properties is None:
             resolved_properties = metadata.properties
+    logger.debug(
+        "Resolved workspace label commit metadata for %s: attrs=%s colors=%s properties=%s",
+        candidate,
+        resolved_attrs is not None,
+        resolved_colors is not None,
+        resolved_properties is not None,
+    )
 
     target_ds = open_dataset(workspace.source_dataset_path, mode="a")
     if timepoint is None:
@@ -176,15 +215,28 @@ def commit_workspace_table(
     append: bool = False,
     chunk_length: int | None = None,
 ):
-    """Commit a table from a workspace to its source dataset."""
+    """Commit a table from a workspace to its source dataset.
+
+    When ``workspace_table`` is supplied and explicit ``attrs`` are omitted,
+    the commit reuses the logical table attrs returned by
+    :meth:`DatasetHandle.read_table`.
+    """
     workspace = open_workspace(ds)
     payload = data
     candidate = str(workspace_table or name)
+    logger.info(
+        "Committing workspace table %s to source dataset=%s scene=%s target=%s",
+        candidate if workspace_table is not None else "<in-memory>",
+        workspace.source_dataset_path,
+        workspace.source_scene_id,
+        name,
+    )
     if payload is None:
         payload = ds.load_table(workspace.source_scene_id, candidate)
     resolved_attrs = attrs
     if workspace_table is not None and resolved_attrs is None:
         resolved_attrs = ds.read_table(workspace.source_scene_id, candidate).table_attrs
+    logger.debug("Resolved workspace table attrs for %s: attrs=%s", candidate, resolved_attrs is not None)
     target_ds = open_dataset(workspace.source_dataset_path, mode="a")
     return target_ds.write_table(
         workspace.source_scene_id,
@@ -198,6 +250,7 @@ def commit_workspace_table(
 
 
 def _normalize_workspace_labels(ds: DatasetHandle, scene_id: str, labels: list[str] | None) -> list[str]:
+    """Validate and normalize requested carried label names for one scene."""
     if labels is None:
         return []
     requested = [str(name) for name in labels]
@@ -217,6 +270,7 @@ def _write_workspace_root_metadata(
     chunks: tuple[int, ...] | None,
     labels: list[str],
 ) -> None:
+    """Persist workspace provenance on the workspace root group."""
     extra = non_ome_attrs(ds.root)
     microio = dict(extra.get("microio", {}))
     microio["workspace"] = {
@@ -234,18 +288,22 @@ def _write_workspace_root_metadata(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     extra["microio"] = microio
+    logger.debug("Writing workspace root metadata for source scene %s with chunks=%s", scene_id, microio["workspace"]["chunks"])
     replace_ome_attrs(root, ome_metadata(ds.root), extra_attrs=extra)
 
 
 def _write_workspace_ome_group(ds: DatasetHandle, root, destination_path: Path, scene_id: str) -> None:
+    """Copy dataset-level OME metadata into the workspace store."""
     ome_source = ds.root.get("OME")
     if ome_source is None:
+        logger.debug("Source dataset %s has no OME group; skipping workspace OME copy", ds.path)
         return
     ome_group = root.create_group("OME")
     ome_attrs = ome_metadata(ome_source)
     ome_attrs["series"] = [str(scene_id)]
     replace_ome_attrs(ome_group, ome_attrs, extra_attrs=non_ome_attrs(ome_source))
     xml_path = destination_path / "OME" / "METADATA.ome.xml"
+    logger.debug("Writing workspace OME sidecar XML to %s", xml_path)
     xml_path.write_text(_subset_ome_xml(ds, scene_id), encoding="utf-8")
 
 
@@ -259,6 +317,7 @@ def _write_workspace_scene(
     chunks: tuple[int, ...] | None,
     threads: int | None,
 ) -> None:
+    """Copy one selected source image level into the workspace scene."""
     scene_group = root.create_group(scene_id)
     attrs = ds.read_scene_metadata(scene_id)
     attrs["multiscales"] = [_single_scene_level_multiscale(ds, scene_id, source_level_path)]
@@ -268,6 +327,13 @@ def _write_workspace_scene(
         scene_ome["omero"] = deepcopy(attrs["omero"])
     replace_ome_attrs(scene_group, scene_ome, extra_attrs=non_ome_attrs(ds.root[scene_id]))
     target_chunks = _resolved_chunks(source.shape, source.dtype, chunks)
+    logger.debug(
+        "Writing workspace scene %s level 0 with shape=%s chunks=%s threads=%s",
+        scene_id,
+        tuple(int(dim) for dim in source.shape),
+        target_chunks,
+        threads,
+    )
     write_array(
         scene_group,
         "0",
@@ -288,10 +354,12 @@ def _carry_labels(
     chunks: tuple[int, ...] | None,
     threads: int | None,
 ) -> None:
+    """Copy requested source labels into the workspace as read-only analysis labels."""
     scene_group = root[scene_id]
     labels_group = scene_group.create_group("labels")
     replace_node_ome_metadata(labels_group, {"labels": sorted(labels)})
     for name in labels:
+        logger.debug("Carrying source label %s into workspace scene %s from level %s", name, scene_id, source_level_path)
         source_group = ds.root[scene_id]["labels"][name]
         label_level = ds.label_level_ref(scene_id, name, source_level_path)
         label_data = ds.read_label(scene_id, name, label_level.path)
@@ -337,6 +405,7 @@ def _single_label_level_multiscale(ds: DatasetHandle, scene_id: str, name: str, 
 
 
 def _workspace_metadata(root) -> dict[str, Any] | None:
+    """Return the stored workspace provenance block from the root attrs."""
     attrs = root.attrs.asdict()
     microio = attrs.get("microio", {})
     workspace = microio.get("workspace")
@@ -344,10 +413,12 @@ def _workspace_metadata(root) -> dict[str, Any] | None:
 
 
 def _resolved_chunks(shape: tuple[int, ...], dtype: Any, chunks: tuple[int, ...] | None) -> tuple[int, ...]:
+    """Resolve workspace array chunks using the shared chunk-sizing helper."""
     return default_chunks(tuple(int(dim) for dim in shape), np.dtype(dtype), chunks)
 
 
 def _subset_ome_xml(ds: DatasetHandle, scene_id: str) -> str:
+    """Return sidecar OME-XML restricted to the workspace source scene."""
     xml_text = ds.read_ome_xml()
     root = ET.fromstring(xml_text)
     images = root.findall("ome:Image", NS)
@@ -360,6 +431,7 @@ def _subset_ome_xml(ds: DatasetHandle, scene_id: str) -> str:
 
 
 def _ensure_workspace_label_can_commit(ds: DatasetHandle, workspace: WorkspaceHandle, name: str) -> None:
+    """Reject commits that target carried read-only workspace labels."""
     if name not in ds.list_labels(workspace.source_scene_id):
         raise KeyError(f"Workspace scene {workspace.source_scene_id} has no label named {name!r}")
     metadata = ds.read_label_metadata(workspace.source_scene_id, name)
@@ -372,4 +444,5 @@ def _ensure_workspace_label_can_commit(ds: DatasetHandle, workspace: WorkspaceHa
 
 def _workspace_label_commit_metadata(ds: DatasetHandle, scene_id: str, name: str):
     """Read logical label metadata in the same shape used by the writer API."""
+    logger.debug("Reading workspace label commit metadata for scene=%s label=%s", scene_id, name)
     return ds.read_label_metadata(scene_id, name)

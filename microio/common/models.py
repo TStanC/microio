@@ -263,7 +263,26 @@ class TableWriteReport:
 
 @dataclass
 class TableReadResult:
-    """Result of loading one scene-local table together with its metadata."""
+    """Result of loading one scene-local table together with its metadata.
+
+    Attributes
+    ----------
+    scene_id:
+        Canonical scene id that owns the table.
+    table_name:
+        Scene-local table name under ``tables/``.
+    data:
+        Eager NumPy-backed table columns keyed by column name.
+    attrs:
+        Raw table-group attrs as stored in the dataset.
+    table_attrs:
+        Logical user attrs corresponding to the writer ``attrs=...`` payload,
+        with internal schema bookkeeping removed.
+    column_names:
+        Column names in stable on-disk order.
+    row_count:
+        Number of rows loaded into ``data``.
+    """
 
     scene_id: str
     table_name: str
@@ -322,7 +341,36 @@ class RoiWriteReport:
 
 @dataclass(frozen=True)
 class WorkspaceHandle:
-    """Resolved metadata for one microio computation workspace."""
+    """Resolved metadata for one microio computation workspace.
+
+    Attributes
+    ----------
+    workspace_path:
+        Filesystem path to the workspace Zarr store.
+    source_dataset_path:
+        Filesystem path to the source dataset from which the workspace was
+        derived.
+    source_scene_id:
+        Canonical scene id copied into the workspace.
+    source_level:
+        Dataset-order level index from the source scene used to seed the
+        workspace image.
+    source_level_path:
+        Source-scene multiscale dataset path, for example ``"0"``.
+    source_level_shape:
+        Shape of the copied source level in dataset axis order.
+    source_level_scale:
+        Parsed level scale vector in dataset axis order.
+    chunks:
+        Chunk layout chosen for the workspace image level.
+    carried_labels:
+        Source-scene label names copied into the workspace as read-only
+        analysis labels.
+    source_scene_name:
+        Human-readable scene name from the source dataset.
+    created_at:
+        ISO-8601 UTC timestamp recorded when the workspace was created.
+    """
 
     workspace_path: Path
     source_dataset_path: Path
@@ -798,7 +846,13 @@ class DatasetHandle:
         return load_table(self, scene, table_name=table_name)
 
     def read_table(self, scene: int | str, table_name: str = "axes_trajectory") -> TableReadResult:
-        """Load one scene-local table together with its logical user attrs."""
+        """Load one scene-local table together with logical user attrs.
+
+        This is the symmetric companion to :meth:`write_table`: the returned
+        :class:`TableReadResult` exposes both the eager table data and the
+        user-facing ``table_attrs`` block corresponding to the writer
+        ``attrs=...`` payload.
+        """
         from microio.reader.tables import read_table
 
         return read_table(self, scene, table_name=table_name)
@@ -1062,7 +1116,12 @@ class DatasetHandle:
         overwrite: bool = False,
         threads: int | None = None,
     ) -> WorkspaceHandle:
-        """Create a computation workspace derived from one source scene."""
+        """Create a computation workspace derived from one source scene.
+
+        The workspace is created as a sibling Zarr store containing one
+        selected image level rechunked for computation, plus an optional
+        read-only subset of existing source labels for analysis.
+        """
         from microio.workspace import create_workspace
 
         return create_workspace(
@@ -1104,7 +1163,12 @@ class DatasetHandle:
         overwrite_timepoint: bool = False,
         threads: int | None = None,
     ) -> LabelWriteReport:
-        """Commit a computed label image from this workspace back to the source dataset."""
+        """Commit a computed workspace label image back to the source dataset.
+
+        When ``workspace_label`` is supplied and explicit ``attrs``,
+        ``colors``, or ``properties`` are omitted, the commit reuses those
+        metadata from the workspace label via :meth:`read_label_metadata`.
+        """
         from microio.workspace import commit_workspace_labels
 
         return commit_workspace_labels(
@@ -1134,7 +1198,12 @@ class DatasetHandle:
         append: bool = False,
         chunk_length: int | None = None,
     ) -> TableWriteReport:
-        """Commit a table from this workspace back to the source dataset."""
+        """Commit a workspace table back to the source dataset.
+
+        When ``workspace_table`` is supplied and explicit ``attrs`` are
+        omitted, the commit reuses the logical table attrs returned by
+        :meth:`read_table`.
+        """
         from microio.workspace import commit_workspace_table
 
         return commit_workspace_table(

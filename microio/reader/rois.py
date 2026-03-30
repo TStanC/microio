@@ -24,7 +24,12 @@ def list_rois(ds: DatasetHandle, scene: int | str) -> list[str]:
 
 
 def read_roi_metadata(ds: DatasetHandle, scene: int | str, name: str) -> dict[str, object]:
-    """Read ROI attrs without loading the image payload."""
+    """Read ROI metadata without loading the image payload.
+
+    The returned mapping includes both the raw flattened ``attrs`` view and
+    the logical ``roi_attrs`` block corresponding to the writer
+    ``attrs=...`` payload.
+    """
     logger.debug("Reading ROI metadata for scene=%s roi=%s", scene, name)
     group = _roi_group(ds, scene, name)
     attrs = flattened_attrs(group)
@@ -43,7 +48,7 @@ def read_roi_metadata(ds: DatasetHandle, scene: int | str, name: str) -> dict[st
 
 
 def load_roi(ds: DatasetHandle, scene: int | str, name: str) -> RoiReadResult:
-    """Load one ROI array together with stored metadata."""
+    """Load one ROI array together with stored metadata and logical user attrs."""
     ref = ds.scene_ref(scene)
     group = _roi_group(ds, ref.id, name)
     metadata = read_roi_metadata(ds, ref.id, name)
