@@ -18,7 +18,7 @@ def test_load_roi_returns_array_and_metadata():
     try:
         _create_small_dataset(dataset)
         ds = open_dataset(dataset, mode="a")
-        ds.write_roi("0", "roi_1", {"t": (0, 2), "z": 0, "y": (2, 6), "x": (3, 7)})
+        ds.write_roi("0", "roi_1", {"t": (0, 2), "z": 0, "y": (2, 6), "x": (3, 7)}, attrs={"note": "test-roi"})
 
         reopened = open_dataset(dataset)
         result = reopened.load_roi("0", "roi_1")
@@ -27,9 +27,11 @@ def test_load_roi_returns_array_and_metadata():
         assert reopened.list_rois("0") == ["roi_1"]
         assert result.shape == (2, 1, 1, 4, 4)
         assert result.array.shape == (2, 1, 1, 4, 4)
+        assert result.roi_attrs == {"note": "test-roi"}
         assert result.microio["origin"] == {"t": 0, "c": 0, "z": 0, "y": 2, "x": 3}
         assert result.microio["source_scene_id"] == "0"
         assert result.ome["multiscales"][0]["datasets"][0]["path"] == "0"
+        assert metadata["roi_attrs"] == {"note": "test-roi"}
         assert metadata["microio"]["slices"]["z"]["indexed"] is True
     finally:
         shutil.rmtree(dataset, ignore_errors=True)

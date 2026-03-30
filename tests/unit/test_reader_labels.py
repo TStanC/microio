@@ -20,7 +20,14 @@ def test_list_labels_and_accessor_on_written_label_dataset():
     try:
         _create_small_dataset(dataset)
         ds = open_dataset(dataset, mode="a")
-        ds.write_label_image("0", "segmentation", np.ones((2, 1, 2, 8, 8), dtype=np.uint16), attrs={"kind": "mask"})
+        ds.write_label_image(
+            "0",
+            "segmentation",
+            np.ones((2, 1, 2, 8, 8), dtype=np.uint16),
+            attrs={"kind": "mask"},
+            colors=[{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 1, "rgba": [0, 255, 0, 255]}],
+            properties=[{"label-value": 1, "class": "mask"}],
+        )
 
         reopened = open_dataset(dataset)
         assert reopened.list_labels("0") == ["segmentation"]
@@ -32,6 +39,9 @@ def test_list_labels_and_accessor_on_written_label_dataset():
         assert label.scene_ref.id == "0"
         assert metadata.label_name == "segmentation"
         assert metadata.microio["label-attrs"] == {"kind": "mask"}
+        assert metadata.label_attrs == {"kind": "mask"}
+        assert metadata.colors == [{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 1, "rgba": [0, 255, 0, 255]}]
+        assert metadata.properties == [{"label-value": 1, "class": "mask"}]
         assert metadata.ome["image-label"]["source"]["image"] == "../../"
         assert levels[0].container_kind == "label"
         assert levels[0].container_name == "segmentation"

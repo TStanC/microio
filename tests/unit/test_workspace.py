@@ -75,8 +75,15 @@ def test_workspace_commit_label_and_table_round_trip():
         workspace_ds = open_dataset(workspace, mode="a")
         computed = np.zeros(workspace_ds.level_ref("0", 0).shape, dtype=np.uint16)
         computed[..., 1:3, 1:3] = 9
-        workspace_ds.write_label_image("0", "computed", computed)
-        workspace_ds.write_table("0", "measurements", {"label_id": [9], "area": [4.0]})
+        workspace_ds.write_label_image(
+            "0",
+            "computed",
+            computed,
+            attrs={"description": "workspace result", "source_channel": 0},
+            colors=[{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 9, "rgba": [255, 255, 0, 255]}],
+            properties=[{"label-value": 9, "class": "nucleus"}],
+        )
+        workspace_ds.write_table("0", "measurements", {"label_id": [9], "area": [4.0]}, attrs={"description": "workspace table"})
 
         label_report = workspace_ds.commit_workspace_labels("final_labels", workspace_label="computed")
         table_report = workspace_ds.commit_workspace_table("final_table", workspace_table="measurements")
@@ -86,7 +93,12 @@ def test_workspace_commit_label_and_table_round_trip():
         assert table_report.persisted is True
         assert "final_labels" in reopened.list_labels("0")
         assert reopened.root["0"]["labels"]["final_labels"]["0"][0, 0, 0, 1, 1] == 9
+        final_md = reopened.read_label_metadata("0", "final_labels")
+        assert final_md.label_attrs == {"description": "workspace result", "source_channel": 0}
+        assert final_md.colors == [{"label-value": 0, "rgba": [0, 0, 0, 0]}, {"label-value": 9, "rgba": [255, 255, 0, 255]}]
+        assert final_md.properties == [{"label-value": 9, "class": "nucleus"}]
         assert reopened.load_table("0", "final_table")["label_id"].tolist() == [9]
+        assert reopened.read_table("0", "final_table").table_attrs == {"description": "workspace table"}
     finally:
         shutil.rmtree(dataset, ignore_errors=True)
         shutil.rmtree(workspace, ignore_errors=True)

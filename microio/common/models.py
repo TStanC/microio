@@ -262,6 +262,19 @@ class TableWriteReport:
 
 
 @dataclass
+class TableReadResult:
+    """Result of loading one scene-local table together with its metadata."""
+
+    scene_id: str
+    table_name: str
+    data: dict[str, Any]
+    attrs: dict[str, Any]
+    table_attrs: dict[str, Any]
+    column_names: list[str]
+    row_count: int
+
+
+@dataclass
 class LabelWriteReport:
     """Result of writing one label image.
 
@@ -343,6 +356,9 @@ class RoiReadResult:
         Eager NumPy array payload loaded from the ROI group.
     attrs:
         Flattened ROI group attrs.
+    roi_attrs:
+        User-supplied ROI attrs previously written through the writer
+        ``attrs=...`` parameter.
     microio:
         Stored microio provenance block from the ROI group attrs.
     ome:
@@ -355,6 +371,7 @@ class RoiReadResult:
     shape: tuple[int, ...]
     array: Any
     attrs: dict[str, Any]
+    roi_attrs: dict[str, Any]
     microio: dict[str, Any]
     ome: dict[str, Any]
 
@@ -375,6 +392,15 @@ class LabelReadResult:
     microio:
         Stored microio label metadata such as source scene linkage, write mode,
         and written timepoints.
+    label_attrs:
+        User-supplied label metadata previously written through the writer
+        ``attrs=...`` parameter.
+    colors:
+        NGFF image-label colors metadata in the same logical shape accepted by
+        the writer ``colors=...`` parameter.
+    properties:
+        NGFF image-label properties metadata in the same logical shape
+        accepted by the writer ``properties=...`` parameter.
     ome:
         Semantic OME metadata projected from the label-group attrs.
     group_attrs:
@@ -387,6 +413,9 @@ class LabelReadResult:
     label_name: str
     attrs: dict[str, Any]
     microio: dict[str, Any]
+    label_attrs: dict[str, Any] | None
+    colors: list[dict[str, Any]] | None
+    properties: list[dict[str, Any]] | None
     ome: dict[str, Any]
     group_attrs: dict[str, Any]
     labels_group_attrs: dict[str, Any]
@@ -767,6 +796,12 @@ class DatasetHandle:
         from microio.reader.tables import load_table
 
         return load_table(self, scene, table_name=table_name)
+
+    def read_table(self, scene: int | str, table_name: str = "axes_trajectory") -> TableReadResult:
+        """Load one scene-local table together with its logical user attrs."""
+        from microio.reader.tables import read_table
+
+        return read_table(self, scene, table_name=table_name)
 
     def list_tables(self, scene: int | str) -> list[str]:
         """List persisted scene-local table names."""

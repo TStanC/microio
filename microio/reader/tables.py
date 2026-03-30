@@ -9,7 +9,7 @@ import numpy as np
 
 from microio.common.constants import AXES_TRAJECTORY_TABLE_NAME, MICROIO_TABLE_SCHEMA_VERSION
 from microio.common.mutations import require_writable
-from microio.common.models import PlaneTableReport, ValidationMessage
+from microio.common.models import PlaneTableReport, TableReadResult, ValidationMessage
 from microio.common.units import normalize_unit
 from microio.reader.metadata import original_metadata, scene_ome_metadata
 from microio.reader.timing import resolve_plane_time_source
@@ -88,6 +88,23 @@ def read_table_metadata(ds, scene_id: int | str, table_name: str = AXES_TRAJECTO
     ref = ds.scene_ref(scene_id)
     logger.debug("Reading table metadata for %s in scene %s", table_name, ref.id)
     return ds.root[ref.id]["tables"][table_name].attrs.asdict()
+
+
+def read_table(ds, scene_id: int | str, table_name: str = AXES_TRAJECTORY_TABLE_NAME) -> TableReadResult:
+    """Load one persisted scene-local table together with logical user attrs."""
+    ref = ds.scene_ref(scene_id)
+    data = load_table(ds, ref.id, table_name=table_name)
+    attrs = read_table_metadata(ds, ref.id, table_name=table_name)
+    table_attrs = _table_user_attrs(attrs)
+    return TableReadResult(
+        scene_id=ref.id,
+        table_name=str(table_name),
+        data=data,
+        attrs=attrs,
+        table_attrs=table_attrs,
+        column_names=list(data.keys()),
+        row_count=len(next(iter(data.values()))) if data else 0,
+    )
 
 
 def build_plane_table(
@@ -339,6 +356,15 @@ def _table_matches_filetype(metadata: dict[str, object], filetype: str | None) -
         requested,
     )
     return stored_filetype == "vsi" or source == "Plane.DeltaT"
+
+
+def _table_user_attrs(attrs: dict[str, object]) -> dict[str, object]:
+    """Return logical user attrs for symmetry with ``write_table(..., attrs=...)``."""
+    return {
+        key: value
+        for key, value in attrs.items()
+        if key not in {"schema", "schema_version", "columns", "n_rows"}
+    }
 
 
 def _axis_metadata(value_key: str, planes: list[dict[str, str | None]], unit_key: str) -> dict[str, object]:

@@ -41,12 +41,17 @@ def read_label_metadata(ds: DatasetHandle, scene: int | str, name: str) -> Label
     attrs = flattened_attrs(label_group)
     multiscale = multiscale_metadata(ds, ref.id, name)
     microio = dict(attrs.get("microio", {}))
+    ome = ome_metadata(label_group)
+    image_label = ome.get("image-label", {}) if isinstance(ome, dict) else {}
     return LabelReadResult(
         scene_id=ref.id,
         label_name=str(name),
         attrs={**deepcopy(attrs), "multiscales": [deepcopy(multiscale)]},
         microio=microio,
-        ome=ome_metadata(label_group),
+        label_attrs=deepcopy(microio.get("label-attrs")) if isinstance(microio.get("label-attrs"), dict) else None,
+        colors=deepcopy(image_label.get("colors")) if isinstance(image_label.get("colors"), list) else None,
+        properties=deepcopy(image_label.get("properties")) if isinstance(image_label.get("properties"), list) else None,
+        ome=ome,
         group_attrs=flattened_attrs(label_group),
         labels_group_attrs=flattened_attrs(labels_group),
     )

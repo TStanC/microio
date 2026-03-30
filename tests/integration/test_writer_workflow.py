@@ -41,6 +41,7 @@ def test_write_table_label_and_roi_on_small_dataset():
         label_group = reopened.root["0"]["labels"]["segmentation"]
         roi_group = reopened.root["0"]["rois"]["roi_1"]
         loaded_table = reopened.load_table("0", "nuclei")
+        read_table = reopened.read_table("0", "nuclei")
         loaded_roi = reopened.load_roi("0", "roi_1")
         label_accessor = reopened.get_label("0", "segmentation")
 
@@ -48,6 +49,8 @@ def test_write_table_label_and_roi_on_small_dataset():
         assert table.attrs["description"] == "derived measurements"
         assert table["label_id"][:].tolist() == [10, 11]
         assert loaded_table["volume"].tolist() == [12.5, 14.0]
+        assert read_table.table_attrs == {"description": "derived measurements"}
+        assert read_table.data["label_id"].tolist() == [10, 11]
 
         assert label_report.shape == label_data.shape
         assert label_group["0"].shape == label_data.shape
@@ -63,6 +66,7 @@ def test_write_table_label_and_roi_on_small_dataset():
         assert roi_report.shape == (2, 1, 2, 6, 6)
         assert roi_group["0"].shape == (2, 1, 2, 6, 6)
         assert loaded_roi.array.shape == (2, 1, 2, 6, 6)
+        assert loaded_roi.roi_attrs == {}
         assert roi_group.attrs["microio"]["origin"] == {"t": 0, "c": 0, "z": 0, "y": 2, "x": 3}
         assert roi_group.attrs["microio"]["source_scene_id"] == "0"
         assert "image-label" not in roi_group.attrs["ome"]

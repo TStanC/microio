@@ -28,14 +28,17 @@ def read_roi_metadata(ds: DatasetHandle, scene: int | str, name: str) -> dict[st
     logger.debug("Reading ROI metadata for scene=%s roi=%s", scene, name)
     group = _roi_group(ds, scene, name)
     attrs = flattened_attrs(group)
+    microio = dict(attrs.get("microio", {}))
+    ome = ome_metadata(group)
     return {
         "scene_id": ds.scene_ref(scene).id,
         "roi_name": str(name),
         "level_path": "0",
         "shape": tuple(int(dim) for dim in group["0"].shape),
         "attrs": attrs,
-        "microio": dict(attrs.get("microio", {})),
-        "ome": ome_metadata(group),
+        "roi_attrs": {key: value for key, value in attrs.items() if key not in {"ome", "microio", "multiscales"}},
+        "microio": microio,
+        "ome": ome,
     }
 
 
@@ -52,6 +55,7 @@ def load_roi(ds: DatasetHandle, scene: int | str, name: str) -> RoiReadResult:
         shape=metadata["shape"],
         array=group["0"][:],
         attrs=metadata["attrs"],
+        roi_attrs=metadata["roi_attrs"],
         microio=metadata["microio"],
         ome=metadata["ome"],
     )

@@ -116,10 +116,22 @@ def commit_workspace_labels(
         )
 
     payload = data
+    candidate = str(workspace_label or name)
     if payload is None:
-        candidate = str(workspace_label or name)
         _ensure_workspace_label_can_commit(ds, workspace, candidate)
         payload = ds.read_label(workspace.source_scene_id, candidate, 0)
+
+    resolved_attrs = attrs
+    resolved_colors = colors
+    resolved_properties = properties
+    if workspace_label is not None:
+        metadata = _workspace_label_commit_metadata(ds, workspace.source_scene_id, candidate)
+        if resolved_attrs is None:
+            resolved_attrs = metadata.label_attrs
+        if resolved_colors is None:
+            resolved_colors = metadata.colors
+        if resolved_properties is None:
+            resolved_properties = metadata.properties
 
     target_ds = open_dataset(workspace.source_dataset_path, mode="a")
     if timepoint is None:
@@ -130,9 +142,9 @@ def commit_workspace_labels(
             source_level=workspace.source_level,
             chunks=chunks,
             dtype=dtype,
-            attrs=attrs,
-            colors=colors,
-            properties=properties,
+            attrs=resolved_attrs,
+            colors=resolved_colors,
+            properties=resolved_properties,
             overwrite=overwrite,
             threads=threads,
         )
@@ -144,9 +156,9 @@ def commit_workspace_labels(
         source_level=workspace.source_level,
         chunks=chunks,
         dtype=dtype,
-        attrs=attrs,
-        colors=colors,
-        properties=properties,
+        attrs=resolved_attrs,
+        colors=resolved_colors,
+        properties=resolved_properties,
         overwrite=overwrite,
         overwrite_timepoint=overwrite_timepoint,
         threads=threads,
@@ -167,15 +179,18 @@ def commit_workspace_table(
     """Commit a table from a workspace to its source dataset."""
     workspace = open_workspace(ds)
     payload = data
+    candidate = str(workspace_table or name)
     if payload is None:
-        table_name = str(workspace_table or name)
-        payload = ds.load_table(workspace.source_scene_id, table_name)
+        payload = ds.load_table(workspace.source_scene_id, candidate)
+    resolved_attrs = attrs
+    if workspace_table is not None and resolved_attrs is None:
+        resolved_attrs = ds.read_table(workspace.source_scene_id, candidate).table_attrs
     target_ds = open_dataset(workspace.source_dataset_path, mode="a")
     return target_ds.write_table(
         workspace.source_scene_id,
         name,
         payload,
-        attrs=attrs,
+        attrs=resolved_attrs,
         overwrite=overwrite,
         append=append,
         chunk_length=chunk_length,
@@ -353,3 +368,8 @@ def _ensure_workspace_label_can_commit(ds: DatasetHandle, workspace: WorkspaceHa
         raise PermissionError(
             f"Workspace label {name!r} is a carried read-only source label and cannot be committed as a computed output."
         )
+
+
+def _workspace_label_commit_metadata(ds: DatasetHandle, scene_id: str, name: str):
+    """Read logical label metadata in the same shape used by the writer API."""
+    return ds.read_label_metadata(scene_id, name)
