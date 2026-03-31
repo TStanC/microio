@@ -8,6 +8,21 @@ existing bioformats2raw-style OME-Zarr datasets on disk.
 It focuses on safe access to scene metadata and image pyramids, plus a small
 set of write-side enrichments for data that already lives in a Zarr store.
 
+## Testing
+
+The default test suite is self-contained and generates miniature OME-Zarr
+fixtures on demand, so it does not require any external microscopy datasets.
+
+An optional external regression lane is also available for checking behavior
+against original large datasets when you explicitly provide pytest paths:
+
+```bash
+pytest tests/external --run-external-datasets \
+  --external-lif-path D:\path\to\lif_test.zarr \
+  --external-vsi-path D:\path\to\vsi_test.zarr \
+  --external-labels-path D:\path\to\test_labels.zarr
+```
+
 ## Installation
 
 ```bash

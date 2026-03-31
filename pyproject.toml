@@ -24,3 +24,8 @@ microio = "microio.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["microio*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "external_dataset: opt-in regression tests requiring explicit external dataset paths",
+]

@@ -109,8 +109,8 @@ def test_write_label_and_roi_on_v2_fixture(vsi_subset):
 
 def test_write_label_timepoints_on_test_labels_fixture(test_labels_subset):
     ds = open_dataset(test_labels_subset, mode="a")
-    base_shape = (1, 1, 31, 3136, 3136)
-    base_chunks = (1, 1, 1, 1024, 1024)
+    base_shape = (1, 1, *ds.level_ref("0", 0).shape[2:])
+    base_chunks = (1, 1, 1, 32, 32)
 
     def pattern(z_range: tuple[int, int], y_range: tuple[int, int], x_range: tuple[int, int], value: int):
         template = da.zeros(base_shape, chunks=base_chunks, dtype=np.uint16)
@@ -138,7 +138,7 @@ def test_write_label_timepoints_on_test_labels_fixture(test_labels_subset):
         return template.map_blocks(_fill, dtype=np.uint16)
 
     frame_a = pattern((0, 2), (0, 16), (0, 16), 5)
-    frame_b = pattern((10, 12), (32, 48), (48, 64), 9)
+    frame_b = pattern((4, 6), (32, 48), (48, 64), 9)
 
     report_a = ds.write_label_timepoint("0", "segmentation", frame_a, timepoint=2, attrs={"source_channel": 0})
     report_b = ds.write_label_timepoint("0", "segmentation", frame_b, timepoint=7)
@@ -158,12 +158,12 @@ def test_write_label_timepoints_on_test_labels_fixture(test_labels_subset):
     assert label_group.attrs["microio"]["label-attrs"] == {"source_channel": 0}
     assert label_group.attrs["microio"]["written_timepoints"] == [2, 7]
     assert int(level0[2, 0, 0, 0, 0]) == 5
-    assert int(level0[2, 0, 10, 40, 50]) == 0
-    assert int(level0[7, 0, 10, 40, 50]) == 9
+    assert int(level0[2, 0, 4, 40, 50]) == 0
+    assert int(level0[7, 0, 4, 40, 50]) == 9
     assert int(level0[0, 0, 0, 0, 0]) == 0
-    assert level1.shape == (21, 1, 31, 1568, 1568)
+    assert level1.shape == (8, 1, 8, 32, 32)
     assert int(level1[2, 0, 0, 0, 0]) == 5
-    assert int(level1[7, 0, 10, 20, 25]) == 9
+    assert int(level1[7, 0, 4, 20, 25]) == 9
 
 
 def _create_small_dataset(path: Path) -> Path:

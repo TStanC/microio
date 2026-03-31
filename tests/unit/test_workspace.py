@@ -124,6 +124,21 @@ def test_delete_workspace_requires_workspace_provenance():
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def test_create_workspace_rejects_existing_destination_without_overwrite():
+    dataset = _fresh_dataset_path("workspace_existing_source")
+    workspace = _fresh_dataset_path("workspace_existing_copy")
+    try:
+        _create_workspace_source_dataset(dataset)
+        _create_workspace_source_dataset(workspace)
+        ds = open_dataset(dataset, mode="a")
+
+        with pytest.raises(FileExistsError, match="already exists"):
+            ds.create_workspace(workspace, "0")
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def _create_workspace_source_dataset(path: Path) -> Path:
     root = zarr.open(path, mode="w", zarr_format=3)
     scene = root.create_group("0")

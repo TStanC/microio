@@ -10,9 +10,7 @@ import pytest
 import zarr
 
 from microio.reader.open import open_dataset
-
-
-DATA_ROOT = Path(__file__).resolve().parents[3] / "data_in" / "zarr"
+from tests.helpers.datasets import DATA_OUT
 
 
 def test_scene_resolution_by_id_index_and_name(vsi_subset):
@@ -31,8 +29,8 @@ def test_scene_resolution_by_id_index_and_name(vsi_subset):
     assert [ref.id for ref in ds.scene_name_matches("C555")] == ["0"]
 
 
-def test_duplicate_scene_name_is_explicitly_ambiguous():
-    ds = open_dataset(DATA_ROOT / "lif_test.zarr")
+def test_duplicate_scene_name_is_explicitly_ambiguous(lif_like_full):
+    ds = open_dataset(lif_like_full)
 
     matches = ds.scene_name_matches("E8Flex/Stripes/300_300")
     assert len(matches) > 1
@@ -46,8 +44,8 @@ def test_level_access_by_index_and_path(vsi_subset):
 
     levels = ds.list_levels("0")
     assert [level.path for level in levels] == ["0", "1", "2", "3", "4"]
-    assert levels[0].shape == (100, 1, 34, 2818, 2824)
-    assert levels[1].shape == (100, 1, 34, 1409, 1412)
+    assert levels[0].shape == (100, 1, 34, 32, 32)
+    assert levels[1].shape == (100, 1, 34, 16, 16)
 
     by_index = ds.level_ref("0", 1)
     by_path = ds.level_ref("0", "1")
@@ -86,7 +84,7 @@ def test_scene_accessor_and_data_flow_validation(vsi_subset):
     assert isinstance(scene.array(0), da.Array)
     assert isinstance(scene.zarr_array(0), zarr.Array)
     assert isinstance(scene.numpy_array(0), np.ndarray)
-    assert scene.array(0).shape == (100, 1, 34, 2818, 2824)
+    assert scene.array(0).shape == (100, 1, 34, 32, 32)
     assert report.errors == []
     assert report.warnings == []
 
@@ -218,8 +216,8 @@ def test_open_dataset_append_mode_requires_existing_path():
             shutil.rmtree(dataset, ignore_errors=True)
 
 
-def test_real_lif_graph_scene_is_reported_as_invalid_not_crashing():
-    ds = open_dataset(DATA_ROOT / "lif_test.zarr")
+def test_real_lif_graph_scene_is_reported_as_invalid_not_crashing(lif_like_full):
+    ds = open_dataset(lif_like_full)
 
     report = ds.validate_scene_data_flow("0")
     assert any(message.code == "multiscale_invalid" for message in report.errors)
@@ -345,7 +343,7 @@ def _create_minimal_dataset(
 
 
 def _fresh_dataset_path(prefix: str) -> Path:
-    path = DATA_ROOT.parents[1] / "data_out" / f"{prefix}_{uuid.uuid4().hex}.zarr"
+    path = DATA_OUT / f"{prefix}_{uuid.uuid4().hex}.zarr"
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)
     return path

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import numpy as np
 
 from microio.reader.open import open_dataset
@@ -72,11 +69,3 @@ def test_lif_repair_updates_channel_windows_to_dtype_bounds(lif_subset):
     assert [channel["window"]["min"] for channel in channels] == [0.0, 0.0, 0.0]
     assert [channel["window"]["max"] for channel in channels] == [255.0, 255.0, 255.0]
     assert all(0.0 <= channel["window"]["start"] <= channel["window"]["end"] <= 255.0 for channel in channels)
-
-
-def test_source_fixture_is_not_modified(vsi_subset):
-    source_attrs = json.loads(
-        (Path(__file__).resolve().parents[3] / "data_in" / "zarr" / "vsi_test.zarr" / "0" / ".zattrs").read_text()
-    )
-    assert source_attrs["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2] == 1.0
-    assert source_attrs["omero"]["channels"][0]["window"]["max"] == 22800.0
