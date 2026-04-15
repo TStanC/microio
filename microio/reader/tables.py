@@ -231,6 +231,8 @@ def build_plane_table(
         "positioners_y": positioners_y,
         "positioners_x": positioners_x,
     }
+    axis_metadata = _table_axis_metadata(ome_scene, data, time_source=time_source, filetype=filetype)
+    warnings.extend(_axis_table_warnings(ref.id, axis_metadata, data))
     report = PlaneTableReport(
         scene_id=ref.id,
         table_name=table_name,
@@ -240,7 +242,7 @@ def build_plane_table(
     )
     if persist:
         require_writable(ds)
-        _persist_table(ds, ref.id, table_name, data, ome_scene, warnings, time_source=time_source, filetype=filetype)
+        _persist_table(ds, ref.id, table_name, data, ome_scene, warnings, axis_metadata=axis_metadata)
         ds.invalidate_caches(scene_id=ref.id)
         report.persisted = True
         logger.info("Persisted plane table %s for scene %s with %d rows", table_name, ref.id, row_count)
@@ -303,8 +305,7 @@ def _persist_table(
     ome_scene,
     warnings: list[ValidationMessage],
     *,
-    time_source,
-    filetype: str | None,
+    axis_metadata: dict[str, dict[str, object]],
 ) -> None:
     """Persist a normalized plane table into the scene ``tables`` group.
 
@@ -326,23 +327,7 @@ def _persist_table(
     table.attrs["row_axis_order"] = ["t", "c", "z"]
     table.attrs["shape_tcz"] = [ome_scene.size_t, ome_scene.size_c, ome_scene.size_z]
     table.attrs["validation"] = [message.__dict__ for message in warnings]
-    t_metadata = _axis_metadata("DeltaT", ome_scene.planes, "DeltaTUnit")
-    if time_source is not None:
-        t_metadata["unit"] = time_source.unit
-        t_metadata["raw_unit"] = time_source.raw_unit
-        t_metadata["warning_code"] = time_source.warning_code
-        t_metadata["missing_count"] = 0
-    table.attrs["axis_metadata"] = {
-        "t": {
-            **t_metadata,
-            "source": time_source.source if time_source is not None else None,
-            "resolved": bool(time_source is not None),
-            "filetype": str(filetype) if filetype else "generic",
-        },
-        "z": _axis_metadata("PositionZ", ome_scene.planes, "PositionZUnit"),
-        "y": _axis_metadata("PositionY", ome_scene.planes, "PositionYUnit"),
-        "x": _axis_metadata("PositionX", ome_scene.planes, "PositionXUnit"),
-    }
+    table.attrs["axis_metadata"] = axis_metadata
 
 
 def _table_matches_filetype(metadata: dict[str, object], filetype: str | None) -> bool:
@@ -373,7 +358,41 @@ def _table_user_attrs(attrs: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _axis_metadata(value_key: str, planes: list[dict[str, str | None]], unit_key: str) -> dict[str, object]:
+def _table_axis_metadata(ome_scene, data: dict[str, np.ndarray], *, time_source, filetype: str | None) -> dict[str, dict[str, object]]:
+    """Build enriched table axis metadata used for attrs and validation."""
+    expected_count = len(data["positioners_t"])
+    t_metadata = _axis_metadata("DeltaT", ome_scene.planes, "DeltaTUnit", source=None, filetype=filetype)
+    if time_source is not None:
+        t_metadata["unit"] = time_source.unit
+        t_metadata["raw_unit"] = time_source.raw_unit
+        t_metadata["warning_code"] = time_source.warning_code
+        t_metadata["missing_count"] = 0
+        t_metadata["source"] = time_source.source
+        t_metadata["resolved"] = True
+    else:
+        t_metadata["missing_count"] = expected_count
+    z_metadata = _axis_metadata("PositionZ", ome_scene.planes, "PositionZUnit", source="Plane.PositionZ", filetype=filetype)
+    y_metadata = _axis_metadata("PositionY", ome_scene.planes, "PositionYUnit", source="Plane.PositionY", filetype=filetype)
+    x_metadata = _axis_metadata("PositionX", ome_scene.planes, "PositionXUnit", source="Plane.PositionX", filetype=filetype)
+    _apply_column_resolution(z_metadata, data["positioners_z"])
+    _apply_column_resolution(y_metadata, data["positioners_y"])
+    _apply_column_resolution(x_metadata, data["positioners_x"])
+    return {
+        "t": t_metadata,
+        "z": z_metadata,
+        "y": y_metadata,
+        "x": x_metadata,
+    }
+
+
+def _axis_metadata(
+    value_key: str,
+    planes: list[dict[str, str | None]],
+    unit_key: str,
+    *,
+    source: str | None,
+    filetype: str | None,
+) -> dict[str, object]:
     """Summarize unit provenance and completeness for one positioner column."""
     units = {plane.get(unit_key) for plane in planes if plane.get(unit_key)}
     if len(units) > 1:
@@ -381,12 +400,103 @@ def _axis_metadata(value_key: str, planes: list[dict[str, str | None]], unit_key
     raw_unit = next(iter(units), None)
     unit, warning_code = normalize_unit(raw_unit)
     missing_count = sum(1 for plane in planes if plane.get(value_key) is None)
+    observed_count = max(0, len(planes) - missing_count)
     return {
         "unit": unit,
         "raw_unit": raw_unit,
         "warning_code": warning_code,
         "missing_count": missing_count,
+        "resolved": observed_count > 0,
+        "source": source if observed_count > 0 else None,
+        "filetype": str(filetype) if filetype else "generic",
     }
+
+
+def _apply_column_resolution(metadata: dict[str, object], column: np.ndarray) -> None:
+    """Align metadata provenance with actual usable values in the built column."""
+    has_usable_values = bool(np.any(np.isfinite(column)))
+    metadata["resolved"] = has_usable_values
+    if not has_usable_values:
+        metadata["source"] = None
+
+
+def _axis_table_warnings(
+    scene_id: str,
+    axis_metadata: dict[str, dict[str, object]],
+    data: dict[str, np.ndarray],
+) -> list[ValidationMessage]:
+    """Derive metadata-driven warnings for table-backed axes."""
+    warnings: list[ValidationMessage] = []
+    for axis, column_name in {
+        "t": "positioners_t",
+        "z": "positioners_z",
+        "y": "positioners_y",
+        "x": "positioners_x",
+    }.items():
+        metadata = axis_metadata.get(axis, {})
+        column = data[column_name]
+        warnings.extend(_axis_warning_messages(scene_id, axis, column_name, metadata, column))
+    return warnings
+
+
+def _axis_warning_messages(
+    scene_id: str,
+    axis: str,
+    column_name: str,
+    metadata: dict[str, object],
+    column: np.ndarray,
+) -> list[ValidationMessage]:
+    """Convert one axis metadata block plus populated column data into warnings."""
+    warnings: list[ValidationMessage] = []
+    source = metadata.get("source")
+    unit = metadata.get("unit")
+    raw_unit = metadata.get("raw_unit")
+    warning_code = metadata.get("warning_code")
+    missing_count = int(metadata.get("missing_count") or 0)
+    all_missing = bool(np.all(~np.isfinite(column)))
+    any_missing = bool(np.any(~np.isfinite(column)))
+
+    if not source:
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code=f"{axis}_no_table_source",
+                message=f"Scene {scene_id} has no usable per-plane source metadata for table axis {axis}.",
+            )
+        )
+    if all_missing:
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code=f"{axis}_no_table_values",
+                message=f"Scene {scene_id} has no usable per-plane {axis} values for table column {column_name}.",
+            )
+        )
+    if raw_unit is not None and warning_code == "unit_unknown":
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code=f"{axis}_unit_unresolved",
+                message=f"Scene {scene_id} table axis {axis} uses raw unit {raw_unit!r} that could not be normalized.",
+            )
+        )
+    if unit is None:
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code=f"{axis}_unit_missing",
+                message=f"Scene {scene_id} table axis {axis} has no normalized unit metadata.",
+            )
+        )
+    if missing_count > 0 and not all_missing and any_missing:
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code=f"{axis}_table_values_partial",
+                message=f"Scene {scene_id} table axis {axis} is only partially populated ({missing_count} missing values).",
+            )
+        )
+    return warnings
 
 
 def _write_array(group, name: str, values: np.ndarray) -> None:
