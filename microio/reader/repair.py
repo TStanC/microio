@@ -86,7 +86,7 @@ def inspect_axis_metadata(ds, scene_id: int | str, *, filetype: str | None = Non
                 errors.append(t_error)
 
     if axis_states["t"].placeholder:
-        logger.warning("Scene %s has placeholder t metadata", ref.id)
+        logger.debug("Scene %s has placeholder t metadata", ref.id)
         warnings.append(
             ValidationMessage(
                 level="warning",
@@ -155,7 +155,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True, filet
         ome_scene = scene_ome_metadata(ds, ref.id)
     except FileNotFoundError:
         ome_scene = None
-        logger.warning("OME-backed axis repair unavailable for scene %s because OME/METADATA.ome.xml is missing", ref.id)
+        logger.info("OME-backed axis repair unavailable for scene %s because OME/METADATA.ome.xml is missing", ref.id)
 
     if ome_scene is not None and axis_states["z"].placeholder:
         repaired_z, z_messages = _resolve_z_axis(ref.id, ome_scene)
@@ -178,7 +178,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True, filet
             axis_states["t"] = repaired_t
             repaired_axes["t"] = repaired_t
         else:
-            logger.warning("Unable to resolve scalar t axis for scene %s", ref.id)
+            logger.info("Unable to resolve scalar t axis for scene %s", ref.id)
 
     repaired_omero, omero_messages = _resolve_channel_windows(ds, ref.id)
     warnings.extend(omero_messages)
@@ -221,7 +221,7 @@ def repair_axis_metadata(ds, scene_id: int | str, *, persist: bool = True, filet
             repaired_omero is not None,
         )
     elif persist:
-        logger.info("No repairable metadata changes were found for scene %s", ref.id)
+        logger.debug("No repairable metadata changes were found for scene %s", ref.id)
 
     return RepairReport(
         scene_id=ref.id,
@@ -325,7 +325,7 @@ def _resolve_t_axis(
     messages: list[ValidationMessage] = []
     unit, warn = normalize_unit(ome_scene.time_increment_unit)
     if ome_scene.time_increment is not None and ome_scene.time_increment > 0 and unit not in {None, "unknown"}:
-        logger.info("Using Pixels.TimeIncrement for scalar t repair in scene %s", scene_id)
+        logger.debug("Using Pixels.TimeIncrement for scalar t repair in scene %s", scene_id)
         return (
             AxisState(
                 axis="t",

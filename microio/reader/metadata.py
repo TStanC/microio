@@ -236,7 +236,7 @@ def scene_metadata(ds, scene: int | str, *, corrected: bool = True) -> dict:
     attrs = _raw_scene_metadata(ds, ref.id)
     if not corrected:
         return deepcopy(attrs)
-    logger.info("Applying repaired axes overlay to scene %s metadata", ref.id)
+    logger.debug("Applying repaired axes overlay to scene %s metadata", ref.id)
     return _apply_repaired_axes_overlay(attrs)
 
 

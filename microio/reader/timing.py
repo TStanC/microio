@@ -41,7 +41,7 @@ def resolve_plane_time_source(
     delta_source, delta_messages = _delta_t_source(ome_scene)
     messages.extend(delta_messages)
     if delta_source is not None:
-        logger.info("Selected Plane.DeltaT as per-plane time source for scene %s", ome_scene.name)
+        logger.debug("Selected Plane.DeltaT as per-plane time source for scene %s", ome_scene.name)
         return delta_source, messages
 
     if str(filetype or "").lower() != "vsi":
@@ -51,9 +51,9 @@ def resolve_plane_time_source(
     vsi_source, vsi_messages = _vsi_original_metadata_source(ome_scene, original_metadata or {})
     messages.extend(vsi_messages)
     if vsi_source is not None:
-        logger.info("Selected VSI OriginalMetadata as per-plane time source for scene %s", ome_scene.name)
+        logger.debug("Selected VSI OriginalMetadata as per-plane time source for scene %s", ome_scene.name)
     else:
-        logger.warning("No complete VSI OriginalMetadata time source found for scene %s", ome_scene.name)
+        logger.debug("No complete VSI OriginalMetadata time source found for scene %s", ome_scene.name)
     return vsi_source, messages
 
 
@@ -115,7 +115,7 @@ def scalar_t_from_plane_source(scene_id: str, plane_source: PlaneTimeSource) -> 
         )
         return None, messages
 
-    logger.info("Derived scalar t for scene %s from %s: %s %s", scene_id, plane_source.source, median_diff, plane_source.unit)
+    logger.debug("Derived scalar t for scene %s from %s: %s %s", scene_id, plane_source.source, median_diff, plane_source.unit)
     return (
         AxisState(
             axis="t",

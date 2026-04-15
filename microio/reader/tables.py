@@ -220,7 +220,7 @@ def build_plane_table(
         logger.info("Using %s for positioners_t in scene %s", time_source.source, ref.id)
         positioners_t = time_source.values_tcz.reshape(row_count).astype(np.float64, copy=False)
     else:
-        logger.warning("Leaving positioners_t unresolved for scene %s", ref.id)
+        logger.info("Leaving positioners_t unresolved for scene %s", ref.id)
 
     data = {
         "the_t": the_t,
@@ -315,7 +315,7 @@ def _persist_table(
     scene = ds.root[scene_id]
     tables = scene.require_group("tables")
     if table_name in tables:
-        logger.warning("Replacing existing table %s for scene %s during persistence", table_name, scene_id)
+        logger.info("Replacing existing table %s for scene %s during persistence", table_name, scene_id)
         del tables[table_name]
     table = tables.create_group(table_name)
     for name, arr in data.items():

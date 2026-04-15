@@ -65,7 +65,7 @@ def _cmd_inspect(args) -> int:
         except FileNotFoundError:
             scene_payload["ome"] = None
         payload["scenes"][ref.id] = scene_payload
-    logger.info("%s", json.dumps(payload, indent=2, default=str))
+    logger.debug("%s", json.dumps(payload, indent=2, default=str))
     return 0
 
 
@@ -122,7 +122,7 @@ def _cmd_repair(args) -> int:
                 "errors": [_json_ready(message) for message in repair_report.errors],
             },
         }
-    logger.info("%s", json.dumps(payload, indent=2, default=str))
+    logger.debug("%s", json.dumps(payload, indent=2, default=str))
     return 0
 
 
