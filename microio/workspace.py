@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import logging
+import math
+import os
 from pathlib import Path
 import shutil
 from typing import Any
@@ -19,7 +21,7 @@ from microio.common.ngff import node_zarr_format, non_ome_attrs, ome_metadata, r
 from microio.reader.labels import list_labels as list_scene_labels
 from microio.reader.open import open_dataset
 from microio.reader.ome_xml import NS, OME_NS
-from microio.writer.common import default_chunks, replace_node_ome_metadata, write_array
+from microio.writer.common import replace_node_ome_metadata, source_array_creation_kwargs, write_array
 from microio.writer.images import (
     _image_label_version,
     _single_scale_multiscale,
@@ -58,7 +60,10 @@ def create_workspace(
         overwrite,
     )
     source = ds.read_level(ref.id, level.path)
+    source_array = ds.read_level_zarr(ref.id, level.path)
     requested_labels = _normalize_workspace_labels(ds, ref.id, labels)
+    resolved_chunks = _resolved_chunks(level.shape, level.dtype, chunks)
+    resolved_threads = _resolved_threads(threads)
     destination_path = Path(destination)
     if destination_path.exists():
         if not overwrite:
@@ -68,13 +73,37 @@ def create_workspace(
 
     zarr_format = node_zarr_format(ds.root)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.debug("Workspace %s will use zarr_format=%s carried_labels=%s", destination_path, zarr_format, requested_labels)
+    logger.debug(
+        "Workspace %s will use zarr_format=%s carried_labels=%s chunks=%s threads=%s",
+        destination_path,
+        zarr_format,
+        requested_labels,
+        resolved_chunks,
+        resolved_threads,
+    )
     root = zarr.open(destination_path, mode="w", zarr_format=zarr_format)
-    _write_workspace_root_metadata(ds, root, ref.id, level, chunks=chunks, labels=requested_labels)
+    _write_workspace_root_metadata(ds, root, ref.id, level, chunks=resolved_chunks, labels=requested_labels)
     _write_workspace_ome_group(ds, root, destination_path, ref.id)
-    _write_workspace_scene(ds, root, ref.id, level.path, source, chunks=chunks, threads=threads)
+    _write_workspace_scene(
+        ds,
+        root,
+        ref.id,
+        level.path,
+        source,
+        chunks=resolved_chunks,
+        threads=resolved_threads,
+        creation_kwargs=source_array_creation_kwargs(source_array),
+    )
     if requested_labels:
-        _carry_labels(ds, root, ref.id, level.path, requested_labels, chunks=chunks, threads=threads)
+        _carry_labels(
+            ds,
+            root,
+            ref.id,
+            level.path,
+            requested_labels,
+            chunks=resolved_chunks,
+            threads=resolved_threads,
+        )
     workspace_ds = open_dataset(destination_path, mode="a")
     logger.info("Created workspace %s for source scene %s", destination_path, ref.id)
     return open_workspace(workspace_ds)
@@ -314,8 +343,9 @@ def _write_workspace_scene(
     source_level_path: str,
     source,
     *,
-    chunks: tuple[int, ...] | None,
+    chunks: tuple[int, ...],
     threads: int | None,
+    creation_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Copy one selected source image level into the workspace scene."""
     scene_group = root.create_group(scene_id)
@@ -326,21 +356,21 @@ def _write_workspace_scene(
     if "omero" in attrs:
         scene_ome["omero"] = deepcopy(attrs["omero"])
     replace_ome_attrs(scene_group, scene_ome, extra_attrs=non_ome_attrs(ds.root[scene_id]))
-    target_chunks = _resolved_chunks(source.shape, source.dtype, chunks)
     logger.debug(
         "Writing workspace scene %s level 0 with shape=%s chunks=%s threads=%s",
         scene_id,
         tuple(int(dim) for dim in source.shape),
-        target_chunks,
+        chunks,
         threads,
     )
     write_array(
         scene_group,
         "0",
         source,
-        chunks=target_chunks,
+        chunks=chunks,
         threads=threads,
         dimension_names=tuple(axis["name"] for axis in attrs["multiscales"][0]["axes"]) if node_zarr_format(scene_group) >= 3 else None,
+        creation_kwargs=creation_kwargs,
     )
 
 
@@ -351,7 +381,7 @@ def _carry_labels(
     source_level_path: str,
     labels: list[str],
     *,
-    chunks: tuple[int, ...] | None,
+    chunks: tuple[int, ...],
     threads: int | None,
 ) -> None:
     """Copy requested source labels into the workspace as read-only analysis labels."""
@@ -362,6 +392,7 @@ def _carry_labels(
         logger.debug("Carrying source label %s into workspace scene %s from level %s", name, scene_id, source_level_path)
         source_group = ds.root[scene_id]["labels"][name]
         label_level = ds.label_level_ref(scene_id, name, source_level_path)
+        source_array = ds.read_label_zarr(scene_id, name, label_level.path)
         label_data = ds.read_label(scene_id, name, label_level.path)
         target_group = labels_group.create_group(name)
         target_chunks = _resolved_chunks(label_level.shape, label_level.dtype, chunks)
@@ -372,6 +403,7 @@ def _carry_labels(
             chunks=target_chunks,
             threads=threads,
             dimension_names=label_level.axis_names if node_zarr_format(target_group) >= 3 else None,
+            creation_kwargs=source_array_creation_kwargs(source_array),
         )
         label_ome = ome_metadata(source_group)
         label_multiscale = _single_label_level_multiscale(ds, scene_id, name, label_level.path)
@@ -413,8 +445,37 @@ def _workspace_metadata(root) -> dict[str, Any] | None:
 
 
 def _resolved_chunks(shape: tuple[int, ...], dtype: Any, chunks: tuple[int, ...] | None) -> tuple[int, ...]:
-    """Resolve workspace array chunks using the shared chunk-sizing helper."""
-    return default_chunks(tuple(int(dim) for dim in shape), np.dtype(dtype), chunks)
+    """Resolve workspace chunks with a compute-oriented full-z tiling policy."""
+    normalized_shape = tuple(int(dim) for dim in shape)
+    dtype_obj = np.dtype(dtype)
+    if chunks is not None:
+        return tuple(int(max(1, min(dim, chunk))) for dim, chunk in zip(normalized_shape, chunks, strict=True))
+    if len(normalized_shape) != 5:
+        return tuple(int(dim) for dim in normalized_shape)
+    z_size = max(1, int(normalized_shape[2]))
+    itemsize = max(1, int(dtype_obj.itemsize))
+    target_bytes = 32 * 1024 * 1024
+    tile_area = max(1, target_bytes // max(1, itemsize * z_size))
+    side_limit = max(1, int(math.sqrt(tile_area)))
+    power = 1 << max(0, int(math.floor(math.log2(max(1, side_limit)))))
+    side = max(128, min(1024, power))
+    return (
+        1,
+        1,
+        z_size,
+        min(int(normalized_shape[3]), int(side)),
+        min(int(normalized_shape[4]), int(side)),
+    )
+
+
+def _resolved_threads(threads: int | None) -> int:
+    """Choose a bounded default worker count for Dask-backed workspace writes."""
+    if threads is not None:
+        return max(1, int(threads))
+    cpu_total = os.cpu_count() or 1
+    if cpu_total <= 2:
+        return 1
+    return max(1, min(8, cpu_total // 2))
 
 
 def _subset_ome_xml(ds: DatasetHandle, scene_id: str) -> str:

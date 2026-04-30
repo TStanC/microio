@@ -173,6 +173,7 @@ def write_array(
     chunks: tuple[int, ...],
     threads: int | None = None,
     dimension_names: tuple[str, ...] | None = None,
+    creation_kwargs: dict[str, Any] | None = None,
 ):
     """Persist one array using either Dask or NumPy-backed write paths.
 
@@ -181,6 +182,7 @@ def write_array(
     can optionally be written in chunks along axis ``0``.
     """
     dtype = np.dtype(data.dtype) if hasattr(data, "dtype") else np.asarray(data).dtype
+    array_kwargs = dict(creation_kwargs or {})
     target = group.create_array(
         name,
         shape=tuple(int(dim) for dim in data.shape),
@@ -189,6 +191,7 @@ def write_array(
         dimension_names=dimension_names,
         overwrite=True,
         write_data=False,
+        **array_kwargs,
     )
     if isinstance(data, da.Array):
         logger.debug("Writing Dask array %s/%s with chunks=%s threads=%s", group.path, name, chunks, threads or 1)
@@ -305,3 +308,32 @@ def read_node_ome_metadata(node) -> dict[str, Any]:
 def group_zarr_format(node) -> int:
     """Return a group's Zarr format number."""
     return node_zarr_format(node)
+
+
+def source_array_creation_kwargs(array) -> dict[str, Any]:
+    """Return array-creation kwargs that preserve source storage settings.
+
+    The helper intentionally keeps to portable settings that matter for write
+    throughput and compatibility: compression-related codecs plus shard shape
+    when present on Zarr v3 arrays.
+    """
+    zarr_format = node_zarr_format(array)
+    if zarr_format >= 3:
+        kwargs: dict[str, Any] = {}
+        shards = getattr(array, "shards", None)
+        if shards is not None:
+            kwargs["shards"] = tuple(int(item) for item in shards)
+        compressors = getattr(array, "compressors", None)
+        if compressors is not None:
+            kwargs["compressors"] = tuple(compressors)
+        filters = getattr(array, "filters", None)
+        if filters:
+            kwargs["filters"] = tuple(filters)
+        serializer = getattr(array, "serializer", None)
+        if serializer is not None:
+            kwargs["serializer"] = serializer
+        return kwargs
+    compressors = getattr(array, "compressors", None)
+    if compressors:
+        return {"compressor": compressors[0]}
+    return {}

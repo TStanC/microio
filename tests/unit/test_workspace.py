@@ -4,11 +4,13 @@ from pathlib import Path
 import shutil
 import uuid
 
+from numcodecs import Blosc
 import numpy as np
 import pytest
 import zarr
 
 from microio.reader.open import open_dataset
+from microio.workspace import _resolved_chunks
 
 
 DATA_OUT = Path(__file__).resolve().parents[3] / "data_out"
@@ -139,10 +141,32 @@ def test_create_workspace_rejects_existing_destination_without_overwrite():
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-def _create_workspace_source_dataset(path: Path) -> Path:
-    root = zarr.open(path, mode="w", zarr_format=3)
+def test_workspace_default_chunks_prefer_full_z_with_dtype_aware_spatial_tiles():
+    assert _resolved_chunks((100, 1, 34, 2818, 2824), np.dtype(np.uint16), None) == (1, 1, 34, 512, 512)
+    assert _resolved_chunks((9, 3, 26, 3869, 9053), np.dtype(np.uint8), None) == (1, 1, 26, 1024, 1024)
+
+
+def test_create_workspace_preserves_v2_source_compressor():
+    dataset = _fresh_dataset_path("workspace_v2_source")
+    workspace = _fresh_dataset_path("workspace_v2_copy")
+    try:
+        _create_workspace_source_dataset(dataset, zarr_format=2, compressor=Blosc(cname="lz4", clevel=5, shuffle=Blosc.SHUFFLE))
+        ds = open_dataset(dataset, mode="a")
+
+        ds.create_workspace(workspace, "0")
+
+        workspace_ds = open_dataset(workspace)
+        array = workspace_ds.read_level_zarr("0", 0)
+        assert array.compressors[0].cname == "lz4"
+    finally:
+        shutil.rmtree(dataset, ignore_errors=True)
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _create_workspace_source_dataset(path: Path, *, zarr_format: int = 3, compressor=None) -> Path:
+    root = zarr.open(path, mode="w", zarr_format=zarr_format)
     scene = root.create_group("0")
-    scene.attrs["ome"] = {
+    scene_ome = {
         "version": "0.5",
         "multiscales": [
             {
@@ -167,11 +191,21 @@ def _create_workspace_source_dataset(path: Path) -> Path:
             }
         ],
     }
+    if zarr_format >= 3:
+        scene.attrs["ome"] = scene_ome
+    else:
+        scene.attrs.update(scene_ome)
     level0 = np.arange(2 * 1 * 2 * 8 * 8, dtype=np.uint16).reshape(2, 1, 2, 8, 8)
-    scene.create_array("0", data=level0, chunks=(1, 1, 1, 8, 8), dimension_names=("t", "c", "z", "y", "x"))
-    scene.create_array("1", data=level0[..., ::2, ::2], chunks=(1, 1, 1, 4, 4), dimension_names=("t", "c", "z", "y", "x"))
+    create_kwargs = {"compressor": compressor} if zarr_format < 3 and compressor is not None else {}
+    if zarr_format >= 3:
+        create_kwargs["dimension_names"] = ("t", "c", "z", "y", "x")
+    scene.create_array("0", data=level0, chunks=(1, 1, 1, 8, 8), **create_kwargs)
+    scene.create_array("1", data=level0[..., ::2, ::2], chunks=(1, 1, 1, 4, 4), **create_kwargs)
     ome = root.create_group("OME")
-    ome.attrs["ome"] = {"version": "0.5", "series": ["0"]}
+    if zarr_format >= 3:
+        ome.attrs["ome"] = {"version": "0.5", "series": ["0"]}
+    else:
+        ome.attrs["series"] = ["0"]
     (path / "OME" / "METADATA.ome.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?><OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image ID="Image:0" Name="scene"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint16" SizeT="2" SizeC="1" SizeZ="2" SizeY="8" SizeX="8"/></Image></OME>',
         encoding="utf-8",

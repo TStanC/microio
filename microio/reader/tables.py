@@ -394,11 +394,28 @@ def _axis_metadata(
     filetype: str | None,
 ) -> dict[str, object]:
     """Summarize unit provenance and completeness for one positioner column."""
-    units = {plane.get(unit_key) for plane in planes if plane.get(unit_key)}
-    if len(units) > 1:
-        raise ValueError(f"Mixed units for {value_key}: {sorted(units)}")
-    raw_unit = next(iter(units), None)
-    unit, warning_code = normalize_unit(raw_unit)
+    raw_units = sorted({plane.get(unit_key) for plane in planes if plane.get(unit_key)})
+    normalized_units: set[str | None] = set()
+    observed_warning_codes: set[str] = set()
+    for raw_unit in raw_units:
+        unit, warning_code = normalize_unit(raw_unit)
+        normalized_units.add(unit)
+        if warning_code is not None:
+            observed_warning_codes.add(warning_code)
+
+    if len(normalized_units) > 1:
+        raw_unit = None
+        unit = None
+        warning_code = "unit_mixed"
+    else:
+        unit = next(iter(normalized_units), None)
+        raw_unit = raw_units[0] if len(raw_units) == 1 else None
+        if len(raw_units) > 1:
+            warning_code = "unit_mixed_normalized"
+        elif len(observed_warning_codes) == 1:
+            warning_code = next(iter(observed_warning_codes))
+        else:
+            warning_code = None
     missing_count = sum(1 for plane in planes if plane.get(value_key) is None)
     observed_count = max(0, len(planes) - missing_count)
     return {
@@ -478,6 +495,22 @@ def _axis_warning_messages(
                 level="warning",
                 code=f"{axis}_unit_unresolved",
                 message=f"Scene {scene_id} table axis {axis} uses raw unit {raw_unit!r} that could not be normalized.",
+            )
+        )
+    if warning_code == "unit_mixed":
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code=f"{axis}_unit_mixed",
+                message=f"Scene {scene_id} table axis {axis} mixes incompatible raw units across planes.",
+            )
+        )
+    if warning_code == "unit_mixed_normalized":
+        warnings.append(
+            ValidationMessage(
+                level="warning",
+                code=f"{axis}_unit_mixed_normalized",
+                message=f"Scene {scene_id} table axis {axis} mixes raw units that normalize to the same canonical unit.",
             )
         )
     if unit is None:
